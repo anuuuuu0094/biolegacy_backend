@@ -39,6 +39,10 @@ RAZORPAY_KEY_SECRET=replace-me
 RAZORPAY_WEBHOOK_SECRET=replace-me
 ```
 
+In production, set `FRONTEND_URL=https://biolegacy.vercel.app`. Multiple exact
+origins can be supplied as a comma-separated list when preview or custom domains
+also need API access.
+
 Seeding requires an explicitly chosen administrator password (at least 16 characters):
 
 ```bash

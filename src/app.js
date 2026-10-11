@@ -15,7 +15,13 @@ app.disable("x-powered-by");
 app.use(helmet());
 app.use(
   cors({
-    origin: env.frontendUrl,
+    origin(origin, callback) {
+      if (!origin || env.frontendUrls.includes(origin.replace(/\/+$/, ""))) {
+        callback(null, true);
+        return;
+      }
+      callback(null, false);
+    },
     credentials: true,
   })
 );
