@@ -1,0 +1,33 @@
+const asyncHandler = require("../../utils/asyncHandler");
+const { success } = require("../../utils/apiResponse");
+const service = require("./admin.service");
+const analytics = require("./analytics.service");
+
+const listSeries = asyncHandler(async (req,res)=>success(res,await service.listSeries(),"Test series fetched"));
+const getSeries = asyncHandler(async (req,res)=>success(res,await service.getSeries(req.params.id),"Test series fetched"));
+const createSeries = asyncHandler(async (req,res)=>success(res,await service.createSeries(req.body,req.user.sub),"Test series created",201));
+const updateSeries = asyncHandler(async (req,res)=>success(res,await service.updateSeries(req.params.id,req.body,req.user.sub),"Test series updated"));
+const archiveSeries = asyncHandler(async (req,res)=>{await service.archiveSeries(req.params.id,req.user.sub);success(res,null,"Test series archived");});
+const listTests = asyncHandler(async (req,res)=>success(res,await service.listTests(req.query.seriesId),"Tests fetched"));
+const getTest = asyncHandler(async (req,res)=>success(res,await service.getTest(req.params.id),"Test fetched"));
+const createTest = asyncHandler(async (req,res)=>success(res,await service.createTest(req.body,req.user.sub),"Test created",201));
+const updateTest = asyncHandler(async (req,res)=>success(res,await service.updateTest(req.params.id,req.body,req.user.sub),"Test updated"));
+const sections = asyncHandler(async (req,res)=>success(res,await service.replaceSections(req.params.id,req.body.sections,req.user.sub),"Sections updated"));
+const listQuestions = asyncHandler(async (req,res)=>{const result=await service.listQuestions(req.query);success(res,result.data,"Questions fetched",200,result.meta);});
+const createQuestion = asyncHandler(async (req,res)=>success(res,await service.saveQuestion(req.body,req.user.sub),"Question created",201));
+const updateQuestion = asyncHandler(async (req,res)=>success(res,await service.saveQuestion(req.body,req.user.sub,req.params.id),"Question updated"));
+const importQuestions = asyncHandler(async (req,res)=>success(res,await service.importQuestions(req.body.questions,req.user.sub),"Questions imported",201));
+const archiveQuestion = asyncHandler(async (req,res)=>{await service.archiveQuestion(req.params.id,req.user.sub);success(res,null,"Question archived");});
+const assign = asyncHandler(async (req,res)=>success(res,await service.assignQuestions(req.params.id,req.body.questionIds,req.user.sub),"Questions assigned"));
+const generate = asyncHandler(async (req,res)=>success(res,await service.generateFromBlueprint(req.params.id,req.user.sub,req.body.seed),"Test generated"));
+const transition = asyncHandler(async (req,res)=>success(res,await service.transitionTest(req.params.id,req.body.action,req.user.sub),"Test status updated"));
+const attempts = asyncHandler(async(req,res)=>{const result=await analytics.listAttempts(req.query);success(res,result.data,"Attempts fetched",200,result.meta);});
+const attemptDetail = asyncHandler(async(req,res)=>success(res,await analytics.attemptDetail(req.params.id),"Attempt fetched"));
+const testAnalytics = asyncHandler(async(req,res)=>success(res,await analytics.testAnalytics(req.params.id),"Test analytics fetched"));
+const seriesAnalytics = asyncHandler(async(req,res)=>success(res,await analytics.seriesAnalytics(req.params.id),"Series analytics fetched"));
+const preview = asyncHandler(async(req,res)=>success(res,await analytics.preview(req.params.id),"Preview fetched"));
+const eligibility = asyncHandler(async(req,res)=>success(res,await analytics.setEligibleUsers(req.params.id,req.body.userIds,req.user.sub),"Eligibility updated"));
+const seriesMembership = asyncHandler(async(req,res)=>success(res,await service.getSeriesMembership(req.params.id),"Series membership fetched"));
+const replaceSeriesMembership = asyncHandler(async(req,res)=>success(res,await service.replaceSeriesMembership(req.params.id,req.body,req.user.sub),"Series membership updated"));
+
+module.exports={listSeries,getSeries,createSeries,updateSeries,archiveSeries,seriesMembership,replaceSeriesMembership,listTests,getTest,createTest,updateTest,sections,listQuestions,createQuestion,updateQuestion,importQuestions,archiveQuestion,assign,generate,transition,attempts,attemptDetail,testAnalytics,seriesAnalytics,preview,eligibility};

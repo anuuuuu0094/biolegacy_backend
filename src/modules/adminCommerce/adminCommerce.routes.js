@@ -1,0 +1,18 @@
+const router=require("express").Router();
+const controller=require("./adminCommerce.controller");
+const validate=require("../../middleware/validate");
+const {authenticate,authorize}=require("../../middleware/auth");
+const v=require("./adminCommerce.validation");
+router.use(authenticate,authorize("TEACHER_ADMIN"));
+router.get("/products",controller.products);
+router.post("/products",validate(v.productSchema),controller.createProduct);
+router.put("/products/:id",validate(v.idParams,"params"),validate(v.productSchema),controller.updateProduct);
+router.get("/coupons",controller.coupons);
+router.post("/coupons",validate(v.couponSchema),controller.createCoupon);
+router.put("/coupons/:id",validate(v.idParams,"params"),validate(v.couponSchema),controller.updateCoupon);
+router.get("/orders",controller.orders);
+router.get("/payments",controller.payments);
+router.get("/analytics",controller.analytics);
+router.post("/reconcile",validate(v.reconcileSchema),controller.reconcile);
+router.post("/payments/:id/refund",validate(v.idParams,"params"),validate(v.refundSchema),controller.refund);
+module.exports=router;

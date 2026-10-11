@@ -1,0 +1,36 @@
+const router=require("express").Router();
+const Joi=require("joi");
+const controller=require("./admin.controller");
+const validate=require("../../middleware/validate");
+const {authenticate,authorize}=require("../../middleware/auth");
+const v=require("./admin.validation");
+
+router.use(authenticate,authorize("TEACHER_ADMIN"));
+router.get("/series",controller.listSeries);
+router.post("/series",validate(v.seriesSchema),controller.createSeries);
+router.get("/series/:id",validate(v.idParams,"params"),controller.getSeries);
+router.put("/series/:id",validate(v.idParams,"params"),validate(v.seriesSchema),controller.updateSeries);
+router.delete("/series/:id",validate(v.idParams,"params"),controller.archiveSeries);
+router.get("/series/:id/membership",validate(v.idParams,"params"),controller.seriesMembership);
+router.put("/series/:id/membership",validate(v.idParams,"params"),validate(v.membershipSchema),controller.replaceSeriesMembership);
+router.get("/tests",controller.listTests);
+router.post("/tests",validate(v.testSchema),controller.createTest);
+router.get("/tests/:id",validate(v.idParams,"params"),controller.getTest);
+router.put("/tests/:id",validate(v.idParams,"params"),validate(v.testSchema),controller.updateTest);
+router.put("/tests/:id/sections",validate(v.idParams,"params"),validate(v.sectionsSchema),controller.sections);
+router.put("/tests/:id/questions",validate(v.idParams,"params"),validate(v.assignSchema),controller.assign);
+router.post("/tests/:id/generate",validate(v.idParams,"params"),validate(Joi.object({seed:Joi.string().max(120).allow("",null)})),controller.generate);
+router.post("/tests/:id/transition",validate(v.idParams,"params"),validate(v.publishSchema),controller.transition);
+router.get("/tests/:id/preview",validate(v.idParams,"params"),controller.preview);
+router.get("/tests/:id/analytics",validate(v.idParams,"params"),controller.testAnalytics);
+router.put("/tests/:id/eligible-users",validate(v.idParams,"params"),validate(Joi.object({userIds:Joi.array().items(Joi.string().uuid()).unique().default([])})),controller.eligibility);
+router.get("/series/:id/analytics",validate(v.idParams,"params"),controller.seriesAnalytics);
+router.get("/attempts",controller.attempts);
+router.get("/attempts/:id",validate(v.idParams,"params"),controller.attemptDetail);
+router.get("/questions",controller.listQuestions);
+router.post("/questions",validate(v.questionSchema),controller.createQuestion);
+router.put("/questions/:id",validate(v.idParams,"params"),validate(v.questionSchema),controller.updateQuestion);
+router.delete("/questions/:id",validate(v.idParams,"params"),controller.archiveQuestion);
+router.post("/questions/import",validate(v.importSchema),controller.importQuestions);
+
+module.exports=router;

@@ -1,0 +1,44 @@
+{
+  "name": "biolegacy_backend",
+  "version": "1.0.0",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "db:migrate": "node -e \"require('./src/db/migrate')().then(() => { console.log('Database migration complete'); process.exit(0); }).catch((error) => { console.error(error); process.exit(1); })\"",
+    "db:seed": "node src/scripts/seed.js",
+    "auth:rotate-admin": "node src/scripts/rotate-admin-password.js",
+    "content:seed-blogs": "node src/scripts/seed-blogs.js",
+    "db:seed-neet": "node src/scripts/seed-neet.js",
+    "smoke": "node src/scripts/smoke-test.js",
+    "smoke:neet-e2e": "node src/scripts/e2e-neet-smoke.js",
+    "payments:reconcile": "node src/scripts/reconcile-payments.js",
+    "test": "node --test --test-isolation=none src/tests/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anuuuuu0094/biolegacy_backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/anuuuuu0094/biolegacy_backend/issues"
+  },
+  "homepage": "https://github.com/anuuuuu0094/biolegacy_backend#readme",
+  "description": "",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.6.0",
+    "helmet": "^8.3.0",
+    "joi": "^18.0.2",
+    "jsonwebtoken": "^9.0.3",
+    "morgan": "^1.11.0",
+    "next": "^16.4.0",
+    "pg": "^8.18.0"
+  }
+}

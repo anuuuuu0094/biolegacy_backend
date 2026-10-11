@@ -1,0 +1,45 @@
+const pool=require("../../db/pool");
+const ApiError=require("../../utils/apiError");
+const {getPagination,pageMeta}=require("../../utils/pagination");
+const audit=require("../../utils/audit");
+
+async function listAttempts(query={}) {
+  const {page,limit,offset}=getPagination(query);const params=[];const filters=[];
+  for(const [key,column] of [["testId","ta.test_id"],["studentId","ta.user_id"],["status","ta.status"]]) if(query[key]){params.push(query[key]);filters.push(`${column}=$${params.length}`);}
+  if(query.seriesId){params.push(query.seriesId);filters.push(`EXISTS(SELECT 1 FROM test_series_tests filter_tst WHERE filter_tst.test_id=t.id AND filter_tst.series_id=$${params.length} AND filter_tst.is_active=true)`);}
+  if(query.search){params.push(`%${query.search}%`);filters.push(`(u.full_name ILIKE $${params.length} OR COALESCE(u.email,'') ILIKE $${params.length} OR ta.id::text ILIKE $${params.length})`);}
+  if(query.from){params.push(query.from);filters.push(`ta.started_at>=$${params.length}`);}if(query.to){params.push(query.to);filters.push(`ta.started_at<$${params.length}`);}
+  const where=filters.length?`WHERE ${filters.join(" AND ")}`:"";const count=await pool.query(`SELECT COUNT(*)::int AS total FROM test_attempts ta JOIN tests t ON t.id=ta.test_id JOIN users u ON u.id=ta.user_id ${where}`,params);
+  params.push(limit,offset);const result=await pool.query(`SELECT ta.id,ta.attempt_number,ta.status,ta.started_at,ta.expires_at,ta.submitted_at,ta.auto_submitted,ta.score,ta.max_score,ta.percentage,ta.accuracy,ta.time_taken_seconds,t.id AS test_id,t.name AS test_name,ts.id AS series_id,ts.title AS series_title,u.id AS student_id,u.full_name,u.email FROM test_attempts ta JOIN tests t ON t.id=ta.test_id JOIN test_series ts ON ts.id=t.series_id JOIN users u ON u.id=ta.user_id ${where} ORDER BY ta.started_at DESC LIMIT $${params.length-1} OFFSET $${params.length}`,params);
+  return {data:result.rows.map((r)=>({id:r.id,attemptNumber:r.attempt_number,status:r.status,startedAt:r.started_at,expiresAt:r.expires_at,submittedAt:r.submitted_at,autoSubmitted:r.auto_submitted,score:r.score==null?null:Number(r.score),maxScore:r.max_score==null?null:Number(r.max_score),percentage:r.percentage==null?null:Number(r.percentage),accuracy:r.accuracy==null?null:Number(r.accuracy),timeTakenSeconds:r.time_taken_seconds,testId:r.test_id,testName:r.test_name,seriesId:r.series_id,seriesTitle:r.series_title,student:{id:r.student_id,name:r.full_name,email:r.email}})),meta:pageMeta(count.rows[0].total,page,limit)};
+}
+
+async function attemptDetail(id) {
+  const attempt=await pool.query(`SELECT ta.*,t.name AS test_name,u.full_name,u.email FROM test_attempts ta JOIN tests t ON t.id=ta.test_id JOIN users u ON u.id=ta.user_id WHERE ta.id=$1`,[id]);if(!attempt.rows[0])throw new ApiError(404,"Attempt not found");
+  const questions=await pool.query(`SELECT aq.id,aq.sort_order,aq.subject,aq.topic,aq.difficulty,aq.snapshot,aa.selected_option_ids,aa.visited,aa.marked_for_review,aa.time_spent_seconds,qr.outcome,qr.awarded_marks FROM attempt_questions aq LEFT JOIN attempt_answers aa ON aa.attempt_id=aq.attempt_id AND aa.attempt_question_id=aq.id LEFT JOIN question_results qr ON qr.attempt_question_id=aq.id WHERE aq.attempt_id=$1 ORDER BY aq.sort_order`,[id]);
+  return {attempt:attempt.rows[0],questions:questions.rows.map((r)=>({id:r.id,number:r.sort_order+1,subject:r.subject,topic:r.topic,difficulty:r.difficulty,questionText:r.snapshot.questionText,options:r.snapshot.options,correctOptionIds:r.snapshot.correctOptionIds,selectedOptionIds:r.selected_option_ids||[],visited:r.visited,markedForReview:r.marked_for_review,timeSpentSeconds:r.time_spent_seconds||0,outcome:r.outcome,awardedMarks:r.awarded_marks==null?null:Number(r.awarded_marks)}))};
+}
+
+async function testAnalytics(testId) {
+  const test=await pool.query("SELECT id,name,total_marks,total_questions FROM tests WHERE id=$1",[testId]);if(!test.rows[0])throw new ApiError(404,"Test not found");
+  const summary=await pool.query(`SELECT COUNT(DISTINCT tr.user_id)::int AS students,COUNT(*)::int AS attempts,COALESCE(AVG(tr.score),0) AS average_score,COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP(ORDER BY tr.score),0) AS median_score,COALESCE(MAX(tr.score),0) AS highest_score,COALESCE(MIN(tr.score),0) AS lowest_score,COALESCE(AVG(tr.accuracy),0) AS average_accuracy,COALESCE(AVG(ta.time_taken_seconds),0) AS average_time FROM test_results tr JOIN test_attempts ta ON ta.id=tr.attempt_id WHERE tr.test_id=$1`,[testId]);
+  const subjects=await pool.query(`SELECT key AS subject,AVG((value->>'marks')::numeric) AS average_marks,AVG((value->>'accuracy')::numeric) AS average_accuracy FROM test_results tr CROSS JOIN LATERAL jsonb_each(tr.breakdown->'subjects') WHERE tr.test_id=$1 GROUP BY key ORDER BY key`,[testId]);
+  const questions=await pool.query(`SELECT aq.source_question_id,aq.snapshot->>'questionText' AS question_text,aq.subject,aq.topic,COUNT(*)::int AS responses,COUNT(*) FILTER(WHERE qr.outcome='CORRECT')::int AS correct,COUNT(*) FILTER(WHERE qr.outcome='INCORRECT')::int AS incorrect,COUNT(*) FILTER(WHERE qr.outcome='UNANSWERED')::int AS unanswered FROM question_results qr JOIN attempt_questions aq ON aq.id=qr.attempt_question_id JOIN test_results tr ON tr.id=qr.result_id WHERE tr.test_id=$1 GROUP BY aq.source_question_id,aq.snapshot->>'questionText',aq.subject,aq.topic ORDER BY (COUNT(*) FILTER(WHERE qr.outcome='CORRECT'))::numeric/NULLIF(COUNT(*),0) ASC`,[testId]);
+  const s=summary.rows[0];return {test:{id:test.rows[0].id,name:test.rows[0].name,totalMarks:Number(test.rows[0].total_marks),totalQuestions:test.rows[0].total_questions},summary:{students:s.students,attempts:s.attempts,averageScore:Number(s.average_score),medianScore:Number(s.median_score),highestScore:Number(s.highest_score),lowestScore:Number(s.lowest_score),averageAccuracy:Number(s.average_accuracy),averageTimeSeconds:Number(s.average_time)},subjects:subjects.rows.map((r)=>({subject:r.subject,averageMarks:Number(r.average_marks),averageAccuracy:Number(r.average_accuracy)})),questions:questions.rows.map((r)=>({...r,correctRate:r.responses?Number((r.correct/r.responses*100).toFixed(2)):0}))};
+}
+
+async function seriesAnalytics(seriesId) {
+  const series=await pool.query("SELECT id,title FROM test_series WHERE id=$1",[seriesId]);if(!series.rows[0])throw new ApiError(404,"Test series not found");
+  const result=await pool.query(`SELECT COUNT(DISTINCT tr.user_id)::int AS students,COUNT(*)::int AS attempts,COUNT(DISTINCT tr.test_id)::int AS attempted_tests,COALESCE(AVG(tr.score),0) AS average_score,COALESCE(MAX(tr.score),0) AS highest_score,COALESCE(AVG(tr.accuracy),0) AS average_accuracy FROM test_results tr JOIN test_series_tests tst ON tst.test_id=tr.test_id AND tst.is_active=true WHERE tst.series_id=$1`,[seriesId]);
+  const testCount=(await pool.query("SELECT COUNT(*)::int AS total FROM test_series_tests tst JOIN tests t ON t.id=tst.test_id WHERE tst.series_id=$1 AND tst.is_active=true AND t.lifecycle_status<>'ARCHIVED'",[seriesId])).rows[0].total;const r=result.rows[0];return {series:series.rows[0],totalTests:testCount,students:r.students,attempts:r.attempts,averageScore:Number(r.average_score),highestScore:Number(r.highest_score),averageAccuracy:Number(r.average_accuracy)};
+}
+
+async function preview(testId) {
+  const test=await pool.query("SELECT * FROM tests WHERE id=$1",[testId]);if(!test.rows[0])throw new ApiError(404,"Test not found");
+  const questions=await pool.query(`SELECT q.*,tq.sort_order,ts.name AS section_name,json_agg(json_build_object('id',qo.id,'optionText',qo.option_text,'imageUrl',qo.image_url,'isCorrect',qo.is_correct) ORDER BY qo.sort_order) AS options FROM test_questions tq JOIN questions q ON q.id=tq.question_id LEFT JOIN test_sections ts ON ts.id=tq.section_id JOIN question_options qo ON qo.question_id=q.id WHERE tq.test_id=$1 GROUP BY q.id,tq.sort_order,ts.name ORDER BY tq.sort_order`,[testId]);
+  return {test:test.rows[0],questions:questions.rows.map((q)=>({id:q.id,number:q.sort_order+1,sectionName:q.section_name,code:q.code,questionText:q.question_text,subject:q.subject,chapter:q.chapter,topic:q.topic,difficulty:q.difficulty,questionType:q.question_type,options:q.options,explanation:q.explanation,solution:q.solution}))};
+}
+
+async function setEligibleUsers(testId,userIds,actorId) {const client=await pool.connect();try{await client.query("BEGIN");const exists=await client.query("SELECT id FROM tests WHERE id=$1 FOR UPDATE",[testId]);if(!exists.rows[0])throw new ApiError(404,"Test not found");await client.query("DELETE FROM test_eligible_users WHERE test_id=$1",[testId]);for(const id of userIds)await client.query("INSERT INTO test_eligible_users(test_id,user_id) SELECT $1,id FROM users WHERE id=$2 AND role='STUDENT'",[testId,id]);await client.query("COMMIT");}catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}await audit(actorId,"REPLACE","test_eligible_users",testId,{count:userIds.length});return {count:userIds.length};}
+
+module.exports={listAttempts,attemptDetail,testAnalytics,seriesAnalytics,preview,setEligibleUsers};

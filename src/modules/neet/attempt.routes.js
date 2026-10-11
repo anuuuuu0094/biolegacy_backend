@@ -1,0 +1,13 @@
+const router=require("express").Router();
+const controller=require("./student.controller");
+const validate=require("../../middleware/validate");
+const {authenticate,authorize}=require("../../middleware/auth");
+const v=require("./student.validation");
+router.use(authenticate,authorize("STUDENT"));
+router.get("/:id",validate(v.idParams,"params"),controller.attempt);
+router.put("/:id/answer",validate(v.idParams,"params"),validate(v.answerSchema),controller.answer);
+router.post("/:id/submit",validate(v.idParams,"params"),validate(v.submitSchema),controller.submit);
+router.get("/:id/result",validate(v.idParams,"params"),controller.result);
+router.get("/:id/review",validate(v.idParams,"params"),controller.review);
+router.post("/:id/events",validate(v.idParams,"params"),validate(v.eventSchema),controller.event);
+module.exports=router;

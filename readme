@@ -1,0 +1,82 @@
+biolegacy-backend/
+│
+├── src/
+│
+│   ├── config/                 # All configuration files
+│   │   ├── db.js               # PostgreSQL connection
+│   │   ├── env.js              # Environment validation
+│   │
+│   ├── modules/                # Feature-based architecture
+│   │
+│   │   ├── auth/               # Authentication system
+│   │   │   ├── auth.routes.js
+│   │   │   ├── auth.controller.js
+│   │   │   ├── auth.service.js
+│   │   │   └── auth.validation.js
+│   │
+│   │   ├── user/               # User profile & data
+│   │   │   ├── user.routes.js
+│   │   │   ├── user.controller.js
+│   │   │   ├── user.service.js
+│   │   │   └── user.model.js
+│   │
+│   │   ├── course/             # Courses management
+│   │   │   ├── course.routes.js
+│   │   │   ├── course.controller.js
+│   │   │   ├── course.service.js
+│   │   │   └── course.model.js
+│   │
+│   │   ├── chapter/            # Course chapters
+│   │   │   ├── chapter.routes.js
+│   │   │   ├── chapter.controller.js
+│   │   │   ├── chapter.service.js
+│   │   │   └── chapter.model.js
+│   │
+│   │   ├── video/              # Video lessons
+│   │   │   ├── video.routes.js
+│   │   │   ├── video.controller.js
+│   │   │   ├── video.service.js
+│   │   │   └── video.model.js
+│   │
+│   │   ├── enrollment/         # Student enrollments
+│   │   │   ├── enrollment.routes.js
+│   │   │   ├── enrollment.controller.js
+│   │   │   ├── enrollment.service.js
+│   │   │   └── enrollment.model.js
+│   │
+│   │   ├── progress/           # Track video progress
+│   │   │   ├── progress.routes.js
+│   │   │   ├── progress.controller.js
+│   │   │   ├── progress.service.js
+│   │   │   └── progress.model.js
+│   │
+│   │   ├── payment/            # (Future) Payments
+│   │   │   ├── payment.routes.js
+│   │   │   ├── payment.controller.js
+│   │   │   ├── payment.service.js
+│   │   │   └── payment.gateway.js
+│   │
+│   │   └── admin/              # Admin-only features
+│   │       ├── admin.routes.js
+│   │       ├── admin.controller.js
+│   │       └── admin.service.js
+│
+│   ├── middleware/             # Global middlewares
+│   │   ├── auth.middleware.js  # JWT verification
+│   │   ├── admin.middleware.js # Admin check
+│   │   ├── error.middleware.js # Global error handler
+│   │
+│   ├── utils/                  # Reusable helpers
+│   │   ├── generateOtp.js
+│   │   ├── sendSms.js
+│   │   ├── logger.js
+│   │   └── pagination.js
+│
+│   ├── app.js                  # Express app config
+│   └── server.js               # Entry point
+│
+├── uploads/                    # Thumbnails / temp files
+│
+├── .env
+├── package.json
+└── README.md

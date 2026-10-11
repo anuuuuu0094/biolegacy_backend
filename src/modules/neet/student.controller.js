@@ -1,0 +1,15 @@
+const asyncHandler=require("../../utils/asyncHandler");
+const {success}=require("../../utils/apiResponse");
+const service=require("./student.service");
+const seriesList=asyncHandler(async(req,res)=>success(res,await service.listPublishedSeries(),"Test series fetched"));
+const seriesDetail=asyncHandler(async(req,res)=>success(res,await service.getSeriesBySlug(req.params.slug,req.user?.sub),"Test series fetched"));
+const testDetail=asyncHandler(async(req,res)=>success(res,await service.getTestDetails(req.params.id,req.user?.sub),"Test fetched"));
+const start=asyncHandler(async(req,res)=>success(res,await service.startAttempt(req.params.id,req.user.sub),"Attempt ready",201));
+const attempt=asyncHandler(async(req,res)=>success(res,await service.hydrateAttempt(req.params.id,req.user.sub),"Attempt fetched"));
+const answer=asyncHandler(async(req,res)=>success(res,await service.saveAnswer(req.params.id,req.user.sub,req.body),"Answer saved"));
+const submit=asyncHandler(async(req,res)=>success(res,await service.submitAttempt(req.params.id,req.user.sub,req.body.answers),"Attempt submitted"));
+const result=asyncHandler(async(req,res)=>success(res,await service.getResult(req.params.id,req.user.sub),"Result fetched"));
+const review=asyncHandler(async(req,res)=>success(res,await service.getReview(req.params.id,req.user.sub),"Review fetched"));
+const leaderboard=asyncHandler(async(req,res)=>success(res,await service.leaderboard(req.params.id),"Leaderboard fetched"));
+const event=asyncHandler(async(req,res)=>success(res,await service.recordEvent(req.params.id,req.user.sub,req.body),"Event recorded"));
+module.exports={seriesList,seriesDetail,testDetail,start,attempt,answer,submit,result,review,leaderboard,event};
