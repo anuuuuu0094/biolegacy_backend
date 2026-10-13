@@ -65,12 +65,28 @@ async function createSession(user) {
   return { user: sanitizeUser(signedInUser), accessToken, refreshToken };
 }
 
-async function login({ email, password }) {
+async function authenticateWithPassword({ email, password }) {
   const result = await pool.query("SELECT * FROM users WHERE email=$1", [email.toLowerCase()]);
   const user = result.rows[0];
 
   if (!user || !user.password_hash || !(await bcrypt.compare(password, user.password_hash))) {
     throw new ApiError(401, "Invalid email or password");
+  }
+  return user;
+}
+
+async function login(input) {
+  const user = await authenticateWithPassword(input);
+  if (user.role === "TEACHER_ADMIN") {
+    throw new ApiError(403, "This account cannot sign in here");
+  }
+  return createSession(user);
+}
+
+async function adminLogin(input) {
+  const user = await authenticateWithPassword(input);
+  if (user.role !== "TEACHER_ADMIN") {
+    throw new ApiError(401, "Invalid administrator credentials");
   }
   return createSession(user);
 }
@@ -92,7 +108,7 @@ async function loginWithIdentity(provider, input) {
     );
     user = linked.rows[0];
     if (user?.role === "TEACHER_ADMIN") {
-      throw new ApiError(403, "Use the administrator password sign-in for this account");
+      throw new ApiError(403, "This account cannot sign in here");
     }
 
     if (!user) {
@@ -100,7 +116,7 @@ async function loginWithIdentity(provider, input) {
         const existing = await client.query("SELECT * FROM users WHERE lower(email)=lower($1) FOR UPDATE", [identity.email]);
         user = existing.rows[0];
         if (user?.role === "TEACHER_ADMIN") {
-          throw new ApiError(403, "Use the administrator password sign-in for this account");
+          throw new ApiError(403, "This account cannot sign in here");
         }
       }
       if (user) {
@@ -195,13 +211,13 @@ async function checkPhoneCode({ phone, code, fullName }) {
     );
     user = linked.rows[0];
     if (user?.role === "TEACHER_ADMIN") {
-      throw new ApiError(403, "Use the administrator password sign-in for this account");
+      throw new ApiError(403, "This account cannot sign in here");
     }
     if (!user) {
       const existing = await client.query("SELECT * FROM users WHERE phone=$1 FOR UPDATE", [phone]);
       user = existing.rows[0];
       if (user?.role === "TEACHER_ADMIN") {
-        throw new ApiError(403, "Use the administrator password sign-in for this account");
+        throw new ApiError(403, "This account cannot sign in here");
       }
       if (user) {
         const updated = await client.query("UPDATE users SET phone_verified=true, updated_at=NOW() WHERE id=$1 RETURNING *", [user.id]);
@@ -401,6 +417,6 @@ async function createUser(input) {
 }
 
 module.exports = {
-  login, loginWithIdentity, sendPhoneCode, checkPhoneCode, getProviderSettings,
+  login, adminLogin, loginWithIdentity, sendPhoneCode, checkPhoneCode, getProviderSettings,
   refresh, logout, logoutAll, getMe, updateProfile, updatePassword, createUser, sanitizeUser,
 };

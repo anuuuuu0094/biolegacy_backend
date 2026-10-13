@@ -5,6 +5,7 @@ const crypto = require("crypto");
 dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 const nodeEnv = process.env.NODE_ENV || "development";
+const developmentAdminPortalKey = "biolegacy-local-admin-portal-key";
 const productionFrontendUrl = "https://biolegacy.vercel.app";
 const defaultFrontendUrl = nodeEnv === "production"
   ? productionFrontendUrl
@@ -27,6 +28,7 @@ const env = {
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || crypto.randomBytes(32).toString("hex"),
   accessTokenTtl: process.env.ACCESS_TOKEN_TTL || "15m",
   refreshTokenTtl: process.env.REFRESH_TOKEN_TTL || "30d",
+  adminPortalKey: (process.env.ADMIN_PORTAL_KEY || (nodeEnv === "production" ? "" : developmentAdminPortalKey)).trim(),
   databaseUrl: process.env.DATABASE_URL || process.env.Db_URL,
   dbConnectionTimeoutMs: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 15000),
   dbQueryTimeoutMs: Number(process.env.DB_QUERY_TIMEOUT_MS || 30000),

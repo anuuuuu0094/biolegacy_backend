@@ -3,6 +3,7 @@ const controller = require("./auth.controller");
 const validate = require("../../middleware/validate");
 const { authenticate, authorize } = require("../../middleware/auth");
 const { authLimiter, phoneOtpSendLimiter, phoneOtpCheckLimiter } = require("../../middleware/security");
+const { requireAdminPortalSignature } = require("../../middleware/adminPortal");
 const {
   loginSchema, refreshSchema, createUserSchema, googleLoginSchema, appleLoginSchema,
   sendPhoneCodeSchema, checkPhoneCodeSchema,
@@ -11,6 +12,7 @@ const {
 
 router.get("/providers", controller.providers);
 router.post("/login", authLimiter, validate(loginSchema), controller.login);
+router.post("/admin/login", authLimiter, requireAdminPortalSignature, validate(loginSchema), controller.adminLogin);
 router.post("/google", authLimiter, validate(googleLoginSchema), controller.googleLogin);
 router.post("/apple", authLimiter, validate(appleLoginSchema), controller.appleLogin);
 router.post("/phone/send-code", authLimiter, phoneOtpSendLimiter, validate(sendPhoneCodeSchema), controller.sendPhoneCode);

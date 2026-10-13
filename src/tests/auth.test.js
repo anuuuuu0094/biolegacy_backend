@@ -1,10 +1,89 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const app = require("../app");
 const pool = require("../db/pool");
 const env = require("../config/env");
 const authService = require("../modules/auth/auth.service");
+const { createAdminPortalSignature } = require("../middleware/adminPortal");
+
+test("public password login refuses administrator accounts", async () => {
+  const originalQuery = pool.query;
+  const passwordHash = await bcrypt.hash("PrivateAdminPassword1!", 4);
+  pool.query = async () => ({ rows: [{
+    id: "admin-1", email: "admin@example.com", password_hash: passwordHash,
+    role: "TEACHER_ADMIN", status: "ACTIVE",
+  }] });
+  try {
+    await assert.rejects(
+      authService.login({ email: "admin@example.com", password: "PrivateAdminPassword1!" }),
+      { statusCode: 403 },
+    );
+  } finally {
+    pool.query = originalQuery;
+  }
+});
+
+test("administrator login endpoint requires a signed portal request", async () => {
+  const server = app.listen(0);
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/auth/admin/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin@example.com", password: "PrivateAdminPassword1!" }),
+    });
+    assert.equal(response.status, 401);
+    assert.equal((await response.json()).success, false);
+  } finally {
+    server.close();
+  }
+});
+
+test("a signed administrator login returns an admin session", async () => {
+  const originalQuery = pool.query;
+  const server = app.listen(0);
+  const passwordHash = await bcrypt.hash("PrivateAdminPassword1!", 4);
+  const admin = {
+    id: "00000000-0000-4000-8000-000000000099",
+    full_name: "Test Admin",
+    email: "admin@example.com",
+    phone: null,
+    password_hash: passwordHash,
+    role: "TEACHER_ADMIN",
+    status: "ACTIVE",
+    avatar_url: null,
+    email_verified: true,
+    phone_verified: false,
+  };
+  pool.query = async (sql) => {
+    if (sql.includes("SELECT * FROM users WHERE email")) return { rows: [admin] };
+    if (sql.includes("UPDATE users SET last_login_at")) return { rows: [{ ...admin, last_login_at: new Date() }] };
+    if (sql.includes("INSERT INTO refresh_tokens")) return { rows: [] };
+    throw new Error(`Unexpected query: ${sql}`);
+  };
+  try {
+    const timestamp = String(Date.now());
+    const signature = createAdminPortalSignature(timestamp, admin.email);
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/auth/admin/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-BioLegacy-Admin-Timestamp": timestamp,
+        "X-BioLegacy-Admin-Signature": signature,
+      },
+      body: JSON.stringify({ email: admin.email, password: "PrivateAdminPassword1!" }),
+    });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.data.user.role, "TEACHER_ADMIN");
+    assert.ok(payload.data.accessToken);
+    assert.ok(payload.data.refreshToken);
+  } finally {
+    pool.query = originalQuery;
+    server.close();
+  }
+});
 
 test("suspended accounts cannot use an existing access token", async () => {
   const originalQuery = pool.query;

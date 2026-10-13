@@ -34,6 +34,7 @@ JWT_ACCESS_SECRET=replace-with-long-secret
 JWT_REFRESH_SECRET=replace-with-another-long-secret
 ACCESS_TOKEN_TTL=15m
 REFRESH_TOKEN_TTL=30d
+ADMIN_PORTAL_KEY=replace-with-at-least-32-random-characters
 RAZORPAY_KEY_ID=rzp_test_replace_me
 RAZORPAY_KEY_SECRET=replace-me
 RAZORPAY_WEBHOOK_SECRET=replace-me
@@ -53,5 +54,11 @@ SEED_ADMIN_PASSWORD=your-unique-long-password
 To rotate an existing administrator password, set `NEW_ADMIN_PASSWORD` in the ignored `.env` file and run `npm run auth:rotate-admin`. The command revokes existing refresh sessions. Remove the temporary value after storing the password in your password manager.
 
 The API requires separate `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` values in production. The development server generates an ephemeral secret for any missing value, so sessions will end on restart until both are configured.
+
+## Private administrator sign-in
+
+Administrator accounts cannot sign in through the public password endpoint. The private frontend gateway sends a short-lived HMAC-signed request to `POST /api/v1/auth/admin/login`; unsigned or stale requests are rejected before credentials reach the database.
+
+Set a unique `ADMIN_PORTAL_KEY` of at least 32 random characters in Render and use the exact same value in the Vercel frontend environment. Never expose it with a `NEXT_PUBLIC_` prefix. Local development uses `biolegacy-local-admin-portal-key` only when the variable is absent; production has no fallback.
 
 Administrators can assign courses to students and manage video learning modules from `/admin/learning` in the frontend. Only active and completed enrollments grant access to learning modules.

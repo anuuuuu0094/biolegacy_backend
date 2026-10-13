@@ -12,6 +12,11 @@ const login = asyncHandler(async (req, res) => {
   success(res, data, "Login successful");
 });
 
+const adminLogin = asyncHandler(async (req, res) => {
+  const data = await authService.adminLogin(req.body);
+  success(res, data, "Administrator login successful");
+});
+
 const refresh = asyncHandler(async (req, res) => {
   const data = await authService.refresh(req.body.refreshToken);
   success(res, data, "Token refreshed");
@@ -66,6 +71,6 @@ const checkPhoneCode = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  providers, login, refresh, logout, me, updateMe, updatePassword, logoutAll,
+  providers, login, adminLogin, refresh, logout, me, updateMe, updatePassword, logoutAll,
   createUser, googleLogin, appleLogin, sendPhoneCode, checkPhoneCode,
 };
