@@ -38,8 +38,8 @@ Published academic records are archived instead of hard-deleted. Attempts refere
 Open `/admin/test-management` after an administrator sign-in.
 
 1. Create a series and configure schedule/access.
-2. Create a test; Physics, Chemistry, and Biology sections are supplied by default and can be edited as JSON.
-3. Add questions manually or import a JSON array.
+2. Create a test; Physics, Chemistry, and Biology sections are supplied by default and can be edited with labeled form fields.
+3. Add questions with the detailed form. The JSON bulk importer remains available only as an optional advanced tool.
 4. Select questions and assign them to a manual test, or configure a blueprint and choose **Generate**.
 5. Preview the test, then publish. Publishing is rejected when duration, sections, questions, answer keys, or schedule are invalid.
 6. Review attempts and analytics. Use manual release for visibility modes configured as `MANUAL_RELEASE`.

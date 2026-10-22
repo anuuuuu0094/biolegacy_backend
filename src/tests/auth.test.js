@@ -6,7 +6,60 @@ const app = require("../app");
 const pool = require("../db/pool");
 const env = require("../config/env");
 const authService = require("../modules/auth/auth.service");
-const { createAdminPortalSignature } = require("../middleware/adminPortal");
+const otpProvider = require("../modules/auth/otpProvider");
+const adminService = require("../modules/admin/admin.service");
+const pdfStorage = require("../services/pdfStorage");
+const { createAdminPortalSignature, createAdminGateAttemptSignature } = require("../middleware/adminPortal");
+
+test("2Factor sends and verifies an OTP without exposing the API key to the client", async () => {
+  const previous = {
+    otpProvider: env.otpProvider,
+    twoFactorApiKey: env.twoFactorApiKey,
+    twoFactorOtpTemplate: env.twoFactorOtpTemplate,
+    twoFactorApiBaseUrl: env.twoFactorApiBaseUrl,
+  };
+  env.otpProvider = "2factor";
+  env.twoFactorApiKey = "test-api-key";
+  env.twoFactorOtpTemplate = "BIOLEGACY_LOGIN";
+  env.twoFactorApiBaseUrl = "https://2factor.in/API/V1";
+  const requestedUrls = [];
+  const request = async (url, options) => {
+    requestedUrls.push(url);
+    assert.equal(options.method, "POST");
+    return new Response(JSON.stringify({ Status: "Success", Details: "OTP Matched" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    assert.deepEqual(await otpProvider.sendPhoneCode("+919876543210", request), {
+      sent: true,
+      message: "Verification code sent",
+    });
+    assert.equal(await otpProvider.verifyPhoneCode("+919876543210", "123456", request), true);
+    assert.equal(requestedUrls[0], "https://2factor.in/API/V1/test-api-key/SMS/919876543210/AUTOGEN/BIOLEGACY_LOGIN");
+    assert.equal(requestedUrls[1], "https://2factor.in/API/V1/test-api-key/SMS/VERIFY3/919876543210/123456");
+  } finally {
+    Object.assign(env, previous);
+  }
+});
+
+test("2Factor rejects an invalid or expired OTP", async () => {
+  const previous = { otpProvider: env.otpProvider, twoFactorApiKey: env.twoFactorApiKey };
+  env.otpProvider = "2factor";
+  env.twoFactorApiKey = "test-api-key";
+  try {
+    await assert.rejects(
+      otpProvider.verifyPhoneCode("+919876543210", "000000", async () => new Response(
+        JSON.stringify({ Status: "Error", Details: "OTP Mismatch" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )),
+      { statusCode: 401, message: "Invalid or expired verification code" },
+    );
+  } finally {
+    Object.assign(env, previous);
+  }
+});
 
 test("public password login refuses administrator accounts", async () => {
   const originalQuery = pool.query;
@@ -75,6 +128,7 @@ test("a signed administrator login returns an admin session", async () => {
       body: JSON.stringify({ email: admin.email, password: "PrivateAdminPassword1!" }),
     });
     assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
     const payload = await response.json();
     assert.equal(payload.data.user.role, "TEACHER_ADMIN");
     assert.ok(payload.data.accessToken);
@@ -85,12 +139,93 @@ test("a signed administrator login returns an admin session", async () => {
   }
 });
 
+test("administrator gateway requires a signed request and the configured high-entropy key", async () => {
+  const server = app.listen(0);
+  const clientKey = "a".repeat(64);
+  const timestamp = String(Date.now());
+  const signature = createAdminGateAttemptSignature(timestamp, clientKey);
+  const request = (accessKey, requestSignature = signature) => fetch(`http://127.0.0.1:${server.address().port}/api/v1/auth/admin/gate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-BioLegacy-Admin-Timestamp": timestamp,
+      "X-BioLegacy-Admin-Signature": requestSignature,
+    },
+    body: JSON.stringify({ accessKey, clientKey }),
+  });
+  try {
+    assert.notEqual(env.adminPortalAccessKey, env.adminPortalSigningKey);
+    const signatureFromAccessKey = createAdminGateAttemptSignature(timestamp, clientKey, env.adminPortalAccessKey);
+    assert.equal((await request(env.adminPortalAccessKey, signatureFromAccessKey)).status, 401);
+    assert.equal((await request("x".repeat(32))).status, 401);
+    assert.equal((await request(env.adminPortalAccessKey)).status, 200);
+  } finally {
+    server.close();
+  }
+});
+
+test("access-token middleware rejects a correctly signed token for the wrong context", async () => {
+  const originalQuery = pool.query;
+  const server = app.listen(0);
+  let databaseReached = false;
+  pool.query = async () => {
+    databaseReached = true;
+    return { rows: [] };
+  };
+  try {
+    const wrongContextToken = jwt.sign(
+      { sub: "student-1", tokenType: "refresh", jti: "wrong-context" },
+      env.jwtAccessSecret,
+      { expiresIn: "15m", issuer: env.jwtIssuer, audience: env.jwtAudience },
+    );
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/student/me/learning`, {
+      headers: { Authorization: `Bearer ${wrongContextToken}` },
+    });
+    assert.equal(response.status, 401);
+    assert.equal(databaseReached, false);
+  } finally {
+    pool.query = originalQuery;
+    server.close();
+  }
+});
+
+test("refresh rejects tokens with the wrong audience before database access", async () => {
+  const originalQuery = pool.query;
+  let databaseReached = false;
+  pool.query = async () => {
+    databaseReached = true;
+    return { rows: [] };
+  };
+  try {
+    const token = jwt.sign(
+      { sub: "student-1", jti: "wrong-audience", tokenType: "refresh" },
+      env.jwtRefreshSecret,
+      { expiresIn: "1h", issuer: env.jwtIssuer, audience: "another-application" },
+    );
+    await assert.rejects(authService.refresh(token), { statusCode: 401 });
+    assert.equal(databaseReached, false);
+  } finally {
+    pool.query = originalQuery;
+  }
+});
+
+test("password creation rejects values that bcrypt would silently truncate", async () => {
+  await assert.rejects(
+    authService.createUser({ password: "😀".repeat(19) }),
+    { statusCode: 400, message: "Password must be at most 72 UTF-8 bytes" },
+  );
+});
+
 test("suspended accounts cannot use an existing access token", async () => {
   const originalQuery = pool.query;
   const server = app.listen(0);
   pool.query = async () => ({ rows: [{ id: "student-1", role: "STUDENT", status: "SUSPENDED" }] });
   try {
-    const token = jwt.sign({ sub: "student-1", role: "STUDENT" }, env.jwtAccessSecret, { expiresIn: "15m" });
+    const token = jwt.sign(
+      { sub: "student-1", role: "STUDENT", tokenType: "access" },
+      env.jwtAccessSecret,
+      { expiresIn: "15m", issuer: env.jwtIssuer, audience: env.jwtAudience },
+    );
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/student/me/learning`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -106,10 +241,120 @@ test("suspended accounts cannot refresh a token", async () => {
   const originalQuery = pool.query;
   pool.query = async () => ({ rows: [{ user_id: "student-1", status: "SUSPENDED" }] });
   try {
-    const token = jwt.sign({ sub: "student-1", jti: "test-session" }, env.jwtRefreshSecret, { expiresIn: "1h" });
+    const token = jwt.sign(
+      { sub: "student-1", jti: "test-session", tokenType: "refresh" },
+      env.jwtRefreshSecret,
+      { expiresIn: "1h", issuer: env.jwtIssuer, audience: env.jwtAudience },
+    );
     await assert.rejects(authService.refresh(token), { statusCode: 401 });
   } finally {
     pool.query = originalQuery;
+  }
+});
+
+test("private PDF management and access routes reject unauthenticated callers", async () => {
+  const server = app.listen(0);
+  const id = "00000000-0000-4000-8000-000000000001";
+  try {
+    const [adminResponse, studentResponse] = await Promise.all([
+      fetch(`http://127.0.0.1:${server.address().port}/api/v1/admin/courses/${id}/materials`),
+      fetch(`http://127.0.0.1:${server.address().port}/api/v1/student/materials/${id}/access`),
+    ]);
+    assert.equal(adminResponse.status, 401);
+    assert.equal(studentResponse.status, 401);
+  } finally {
+    server.close();
+  }
+});
+
+test("PDF completion rejects an object whose stored size differs from the declared upload", async () => {
+  const originalQuery = pool.query;
+  const originalInspectPdf = pdfStorage.inspectPdf;
+  const originalRemove = pdfStorage.remove;
+  const materialId = "00000000-0000-4000-8000-000000000021";
+  let removedKey = "";
+  pool.query = async (sql, params) => {
+    if (sql.includes("SELECT * FROM learning_materials")) {
+      return { rows: [{
+        id: materialId,
+        course_id: "00000000-0000-4000-8000-000000000022",
+        object_key: "courses/course/pdf/material/notes.pdf",
+        size_bytes: "100",
+      }] };
+    }
+    if (sql.includes("upload_status='FAILED'")) {
+      assert.deepEqual(params, [materialId]);
+      return { rows: [], rowCount: 1 };
+    }
+    throw new Error(`Unexpected query: ${sql}`);
+  };
+  pdfStorage.inspectPdf = async () => ({
+    size: 101,
+    contentType: "application/pdf",
+    validSignature: true,
+  });
+  pdfStorage.remove = async (objectKey) => { removedKey = objectKey; };
+  try {
+    await assert.rejects(
+      adminService.completeMaterialUpload(materialId, {
+        title: "Biology notes",
+        description: "",
+        moduleId: null,
+        sortOrder: 0,
+        downloadable: true,
+        published: true,
+      }, "00000000-0000-4000-8000-000000000023"),
+      { statusCode: 400, message: "The uploaded PDF size does not match the selected file" },
+    );
+    assert.equal(removedKey, "courses/course/pdf/material/notes.pdf");
+  } finally {
+    pool.query = originalQuery;
+    pdfStorage.inspectPdf = originalInspectPdf;
+    pdfStorage.remove = originalRemove;
+  }
+});
+
+test("PDF completion rejects a non-PDF storage content type", async () => {
+  const originalQuery = pool.query;
+  const originalInspectPdf = pdfStorage.inspectPdf;
+  const originalRemove = pdfStorage.remove;
+  const materialId = "00000000-0000-4000-8000-000000000024";
+  let removed = false;
+  pool.query = async (sql) => {
+    if (sql.includes("SELECT * FROM learning_materials")) {
+      return { rows: [{
+        id: materialId,
+        course_id: "00000000-0000-4000-8000-000000000025",
+        object_key: "courses/course/pdf/material/not-pdf.pdf",
+        size_bytes: "100",
+      }] };
+    }
+    if (sql.includes("upload_status='FAILED'")) return { rows: [], rowCount: 1 };
+    throw new Error(`Unexpected query: ${sql}`);
+  };
+  pdfStorage.inspectPdf = async () => ({
+    size: 100,
+    contentType: "text/html",
+    validSignature: true,
+  });
+  pdfStorage.remove = async () => { removed = true; };
+  try {
+    await assert.rejects(
+      adminService.completeMaterialUpload(materialId, {
+        title: "Biology notes",
+        description: "",
+        moduleId: null,
+        sortOrder: 0,
+        downloadable: true,
+        published: true,
+      }, "00000000-0000-4000-8000-000000000026"),
+      { statusCode: 400, message: "The uploaded file is not a valid PDF" },
+    );
+    assert.equal(removed, true);
+  } finally {
+    pool.query = originalQuery;
+    pdfStorage.inspectPdf = originalInspectPdf;
+    pdfStorage.remove = originalRemove;
   }
 });
 
@@ -128,7 +373,11 @@ test("an active administrator can assign a course through the API", async () => 
     throw new Error(`Unexpected query: ${sql}`);
   };
   try {
-    const token = jwt.sign({ sub: adminId, role: "TEACHER_ADMIN" }, env.jwtAccessSecret, { expiresIn: "15m" });
+    const token = jwt.sign(
+      { sub: adminId, role: "TEACHER_ADMIN", tokenType: "access" },
+      env.jwtAccessSecret,
+      { expiresIn: "15m", issuer: env.jwtIssuer, audience: env.jwtAudience },
+    );
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/admin/students/${studentId}/enrollments`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -188,7 +437,11 @@ test("an authenticated user can update only supported profile fields", async () 
     throw new Error(`Unexpected query: ${sql}`);
   };
   try {
-    const token = jwt.sign({ sub: userId, role: "STUDENT" }, env.jwtAccessSecret, { expiresIn: "15m" });
+    const token = jwt.sign(
+      { sub: userId, role: "STUDENT", tokenType: "access" },
+      env.jwtAccessSecret,
+      { expiresIn: "15m", issuer: env.jwtIssuer, audience: env.jwtAudience },
+    );
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/auth/me`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -220,7 +473,11 @@ test("profile updates reject unsafe avatar protocols before reaching the databas
     throw new Error(`Unexpected query: ${sql}`);
   };
   try {
-    const token = jwt.sign({ sub: userId, role: "STUDENT" }, env.jwtAccessSecret, { expiresIn: "15m" });
+    const token = jwt.sign(
+      { sub: userId, role: "STUDENT", tokenType: "access" },
+      env.jwtAccessSecret,
+      { expiresIn: "15m", issuer: env.jwtIssuer, audience: env.jwtAudience },
+    );
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/auth/me`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },

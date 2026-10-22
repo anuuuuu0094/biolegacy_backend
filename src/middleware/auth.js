@@ -13,8 +13,15 @@ async function authenticate(req, res, next) {
 
   let claims;
   try {
-    claims = jwt.verify(token, env.jwtAccessSecret);
+    claims = jwt.verify(token, env.jwtAccessSecret, {
+      algorithms: ["HS256"],
+      issuer: env.jwtIssuer,
+      audience: env.jwtAudience,
+    });
   } catch {
+    throw new ApiError(401, "Invalid or expired access token");
+  }
+  if (claims.tokenType !== "access" || typeof claims.sub !== "string") {
     throw new ApiError(401, "Invalid or expired access token");
   }
 
@@ -31,7 +38,12 @@ async function optionalAuthenticate(req, res, next) {
   const header = req.headers.authorization || "";
   if (!header.startsWith("Bearer ")) return next();
   try {
-    const claims = jwt.verify(header.slice(7), env.jwtAccessSecret);
+    const claims = jwt.verify(header.slice(7), env.jwtAccessSecret, {
+      algorithms: ["HS256"],
+      issuer: env.jwtIssuer,
+      audience: env.jwtAudience,
+    });
+    if (claims.tokenType !== "access" || typeof claims.sub !== "string") return next();
     const result = await pool.query("SELECT id, role, status FROM users WHERE id=$1", [claims.sub]);
     const user = result.rows[0];
     if (user?.status === "ACTIVE") req.user = { ...claims, role: user.role };

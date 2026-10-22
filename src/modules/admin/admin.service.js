@@ -2,6 +2,9 @@ const pool = require("../../db/pool");
 const { getPagination, pageMeta } = require("../../utils/pagination");
 const audit = require("../../utils/audit");
 const ApiError = require("../../utils/apiError");
+const crypto = require("crypto");
+const env = require("../../config/env");
+const pdfStorage = require("../../services/pdfStorage");
 
 async function dashboard() {
   const [
@@ -197,4 +200,165 @@ async function archiveModule(id, actorId) {
   await audit(actorId, "ARCHIVE", "learning_module", id);
 }
 
-module.exports = { dashboard, listStudents, updateStudentStatus, listEnrollments, saveEnrollment, listModules, createModule, updateModule, archiveModule };
+function mapMaterial(row) {
+  return {
+    id: row.id,
+    courseId: row.course_id,
+    moduleId: row.module_id,
+    moduleTitle: row.module_title || null,
+    title: row.title,
+    description: row.description,
+    fileName: row.original_file_name,
+    sizeBytes: Number(row.size_bytes),
+    uploadStatus: row.upload_status,
+    downloadable: row.downloadable,
+    published: row.published,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function assertCourse(courseId) {
+  const course = await pool.query("SELECT id FROM courses WHERE id=$1", [courseId]);
+  if (!course.rows[0]) throw new ApiError(404, "Course not found");
+}
+
+async function assertModule(courseId, moduleId) {
+  if (!moduleId) return;
+  const module = await pool.query("SELECT id FROM learning_modules WHERE id=$1 AND course_id=$2", [moduleId, courseId]);
+  if (!module.rows[0]) throw new ApiError(400, "The selected module does not belong to this course");
+}
+
+async function listMaterials(courseId) {
+  await assertCourse(courseId);
+  const result = await pool.query(
+    `SELECT m.*, lm.title AS module_title
+     FROM learning_materials m
+     LEFT JOIN learning_modules lm ON lm.id=m.module_id
+     WHERE m.course_id=$1
+     ORDER BY m.sort_order,m.created_at`,
+    [courseId]
+  );
+  return result.rows.map(mapMaterial);
+}
+
+function cleanFileName(fileName) {
+  return fileName.replace(/[^a-zA-Z0-9._ -]/g, "_").replace(/\s+/g, " ").slice(0, 255);
+}
+
+async function startMaterialUpload(courseId, input, actorId) {
+  await assertCourse(courseId);
+  const maxBytes = env.pdfMaxFileSizeMb * 1024 * 1024;
+  if (input.fileSize > maxBytes) {
+    throw new ApiError(400, `PDF files must be ${env.pdfMaxFileSizeMb} MB or smaller`);
+  }
+  const id = crypto.randomUUID();
+  const fileName = cleanFileName(input.fileName);
+  const objectKey = `courses/${courseId}/pdf/${id}/${fileName}`;
+  const defaultTitle = fileName.replace(/\.pdf$/i, "").trim() || "Course PDF";
+  const quotaBytes = env.pdfStorageQuotaMb * 1024 * 1024;
+  const db = await pool.connect();
+  let inserted;
+  try {
+    await db.query("BEGIN");
+    await db.query("SELECT pg_advisory_xact_lock(hashtext('biolegacy_pdf_storage_quota'))");
+    const usage = await db.query(
+      "SELECT COALESCE(SUM(size_bytes),0)::bigint AS used FROM learning_materials WHERE upload_status IN ('PENDING','READY')"
+    );
+    if (Number(usage.rows[0].used) + input.fileSize > quotaBytes) {
+      throw new ApiError(409, `PDF storage limit reached (${env.pdfStorageQuotaMb} MB application quota)`);
+    }
+    inserted = await db.query(
+      `INSERT INTO learning_materials
+        (id,course_id,title,object_key,original_file_name,mime_type,size_bytes,upload_status,created_by)
+       VALUES($1,$2,$3,$4,$5,'application/pdf',$6,'PENDING',$7) RETURNING *`,
+      [id, courseId, defaultTitle, objectKey, fileName, input.fileSize, actorId]
+    );
+    await db.query("COMMIT");
+  } catch (error) {
+    await db.query("ROLLBACK");
+    throw error;
+  } finally {
+    db.release();
+  }
+  try {
+    const uploadUrl = await pdfStorage.createUploadUrl(objectKey);
+    await audit(actorId, "START_UPLOAD", "learning_material", id, { courseId, fileName, sizeBytes: input.fileSize });
+    return {
+      material: mapMaterial(inserted.rows[0]),
+      uploadUrl,
+      headers: { "Content-Type": "application/pdf" },
+      expiresInSeconds: env.pdfSignedUrlTtlSeconds,
+    };
+  } catch (error) {
+    await pool.query("DELETE FROM learning_materials WHERE id=$1", [id]);
+    throw error;
+  }
+}
+
+async function completeMaterialUpload(id, input, actorId) {
+  const existing = await pool.query("SELECT * FROM learning_materials WHERE id=$1", [id]);
+  const material = existing.rows[0];
+  if (!material) throw new ApiError(404, "PDF material not found");
+  await assertModule(material.course_id, input.moduleId);
+
+  const inspection = await pdfStorage.inspectPdf(material.object_key);
+  const maxBytes = env.pdfMaxFileSizeMb * 1024 * 1024;
+  const expectedSize = Number(material.size_bytes);
+  const hasValidContentType = inspection.contentType.toLowerCase().split(";", 1)[0].trim() === "application/pdf";
+  const sizeMismatch = inspection.size !== expectedSize;
+  if (!inspection.validSignature || !hasValidContentType || inspection.size < 5 || inspection.size > maxBytes || sizeMismatch) {
+    await pdfStorage.remove(material.object_key);
+    await pool.query("UPDATE learning_materials SET upload_status='FAILED',published=false,updated_at=NOW() WHERE id=$1", [id]);
+    let message = "The uploaded file is not a valid PDF";
+    if (inspection.size > maxBytes) message = `PDF files must be ${env.pdfMaxFileSizeMb} MB or smaller`;
+    else if (sizeMismatch) message = "The uploaded PDF size does not match the selected file";
+    throw new ApiError(400, message);
+  }
+
+  const result = await pool.query(
+    `UPDATE learning_materials SET title=$1,description=$2,module_id=$3,sort_order=$4,
+       downloadable=$5,published=$6,size_bytes=$7,mime_type='application/pdf',upload_status='READY',updated_at=NOW()
+     WHERE id=$8 RETURNING *`,
+    [input.title, input.description || null, input.moduleId || null, input.sortOrder,
+      input.downloadable, input.published, inspection.size, id]
+  );
+  await audit(actorId, "COMPLETE_UPLOAD", "learning_material", id, { courseId: material.course_id, sizeBytes: inspection.size });
+  return mapMaterial(result.rows[0]);
+}
+
+async function updateMaterial(id, input, actorId) {
+  const existing = await pool.query("SELECT course_id FROM learning_materials WHERE id=$1", [id]);
+  if (!existing.rows[0]) throw new ApiError(404, "PDF material not found");
+  await assertModule(existing.rows[0].course_id, input.moduleId);
+  const result = await pool.query(
+    `UPDATE learning_materials SET title=$1,description=$2,module_id=$3,sort_order=$4,
+       downloadable=$5,published=CASE WHEN upload_status='READY' THEN $6 ELSE false END,updated_at=NOW()
+     WHERE id=$7 RETURNING *`,
+    [input.title, input.description || null, input.moduleId || null, input.sortOrder,
+      input.downloadable, input.published, id]
+  );
+  await audit(actorId, "UPDATE", "learning_material", id);
+  return mapMaterial(result.rows[0]);
+}
+
+async function archiveMaterial(id, actorId) {
+  const result = await pool.query("UPDATE learning_materials SET published=false,updated_at=NOW() WHERE id=$1 RETURNING id", [id]);
+  if (!result.rows[0]) throw new ApiError(404, "PDF material not found");
+  await audit(actorId, "ARCHIVE", "learning_material", id);
+}
+
+async function deleteMaterial(id, actorId) {
+  const existing = await pool.query("SELECT object_key FROM learning_materials WHERE id=$1", [id]);
+  if (!existing.rows[0]) throw new ApiError(404, "PDF material not found");
+  await pdfStorage.remove(existing.rows[0].object_key);
+  await pool.query("DELETE FROM learning_materials WHERE id=$1", [id]);
+  await audit(actorId, "DELETE", "learning_material", id);
+}
+
+module.exports = {
+  dashboard, listStudents, updateStudentStatus, listEnrollments, saveEnrollment,
+  listModules, createModule, updateModule, archiveModule, listMaterials,
+  startMaterialUpload, completeMaterialUpload, updateMaterial, archiveMaterial, deleteMaterial,
+};

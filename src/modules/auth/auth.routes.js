@@ -2,22 +2,29 @@ const router = require("express").Router();
 const controller = require("./auth.controller");
 const validate = require("../../middleware/validate");
 const { authenticate, authorize } = require("../../middleware/auth");
-const { authLimiter, phoneOtpSendLimiter, phoneOtpCheckLimiter } = require("../../middleware/security");
-const { requireAdminPortalSignature } = require("../../middleware/adminPortal");
+const { authLimiter, phoneOtpSendLimiter, phoneOtpCheckLimiter, adminGateLimiter } = require("../../middleware/security");
+const { requireAdminPortalSignature, requireAdminGateAttemptSignature, adminPortalKeysMatch } = require("../../middleware/adminPortal");
+const ApiError = require("../../utils/apiError");
+const { success } = require("../../utils/apiResponse");
 const {
   loginSchema, refreshSchema, createUserSchema, googleLoginSchema, appleLoginSchema,
   sendPhoneCodeSchema, checkPhoneCodeSchema,
   updateProfileSchema, updatePasswordSchema,
+  adminGateSchema,
 } = require("./auth.validation");
 
 router.get("/providers", controller.providers);
+router.post("/admin/gate", validate(adminGateSchema), requireAdminGateAttemptSignature, adminGateLimiter, (req, res) => {
+  if (!adminPortalKeysMatch(req.body.accessKey)) throw new ApiError(401, "Access denied");
+  success(res, { verified: true }, "Administrator gateway verified");
+});
 router.post("/login", authLimiter, validate(loginSchema), controller.login);
 router.post("/admin/login", authLimiter, requireAdminPortalSignature, validate(loginSchema), controller.adminLogin);
 router.post("/google", authLimiter, validate(googleLoginSchema), controller.googleLogin);
 router.post("/apple", authLimiter, validate(appleLoginSchema), controller.appleLogin);
-router.post("/phone/send-code", authLimiter, phoneOtpSendLimiter, validate(sendPhoneCodeSchema), controller.sendPhoneCode);
-router.post("/phone/verify-code", authLimiter, phoneOtpCheckLimiter, validate(checkPhoneCodeSchema), controller.checkPhoneCode);
-router.post("/refresh", validate(refreshSchema), controller.refresh);
+router.post("/phone/send-code", authLimiter, validate(sendPhoneCodeSchema), phoneOtpSendLimiter, controller.sendPhoneCode);
+router.post("/phone/verify-code", authLimiter, validate(checkPhoneCodeSchema), phoneOtpCheckLimiter, controller.checkPhoneCode);
+router.post("/refresh", authLimiter, validate(refreshSchema), controller.refresh);
 router.post("/logout", validate(refreshSchema), controller.logout);
 router.get("/me", authenticate, controller.me);
 router.patch("/me", authenticate, validate(updateProfileSchema), controller.updateMe);

@@ -4,7 +4,7 @@ const pool = require("../db/pool");
 async function rotateAdminPassword() {
   const email = process.env.SEED_ADMIN_EMAIL || "admin@biolegacy.in";
   const password = process.env.NEW_ADMIN_PASSWORD;
-  if (!password || password.length < 16) {
+  if (!password || password.length < 16 || bcrypt.truncates(password)) {
     throw new Error("Set NEW_ADMIN_PASSWORD to a unique password of at least 16 characters");
   }
 

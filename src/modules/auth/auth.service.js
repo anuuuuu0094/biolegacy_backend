@@ -5,6 +5,7 @@ const pool = require("../../db/pool");
 const env = require("../../config/env");
 const ApiError = require("../../utils/apiError");
 const { verifyIdentityToken, exchangeAppleAuthorizationCode } = require("./identityProviders");
+const otpProvider = require("./otpProvider");
 
 function sanitizeUser(user) {
   const result = {
@@ -29,17 +30,32 @@ function signAccessToken(user) {
   return jwt.sign(
     {
       sub: user.id,
+      tokenType: "access",
       role: user.role,
       email: user.email,
       name: user.full_name,
     },
     env.jwtAccessSecret,
-    { expiresIn: env.accessTokenTtl }
+    {
+      expiresIn: env.accessTokenTtl,
+      algorithm: "HS256",
+      issuer: env.jwtIssuer,
+      audience: env.jwtAudience,
+    }
   );
 }
 
 function signRefreshToken(user) {
-  return jwt.sign({ sub: user.id, jti: crypto.randomUUID() }, env.jwtRefreshSecret, { expiresIn: env.refreshTokenTtl });
+  return jwt.sign(
+    { sub: user.id, jti: crypto.randomUUID(), tokenType: "refresh" },
+    env.jwtRefreshSecret,
+    {
+      expiresIn: env.refreshTokenTtl,
+      algorithm: "HS256",
+      issuer: env.jwtIssuer,
+      audience: env.jwtAudience,
+    },
+  );
 }
 
 function hashToken(token) {
@@ -66,6 +82,7 @@ async function createSession(user) {
 }
 
 async function authenticateWithPassword({ email, password }) {
+  if (bcrypt.truncates(password)) throw new ApiError(401, "Invalid email or password");
   const result = await pool.query("SELECT * FROM users WHERE email=$1", [email.toLowerCase()]);
   const user = result.rows[0];
 
@@ -162,43 +179,11 @@ async function loginWithIdentity(provider, input) {
 }
 
 async function sendPhoneCode(phone) {
-  if (!env.twilioAccountSid || !env.twilioAuthToken || !env.twilioVerifyServiceSid) {
-    throw new ApiError(503, "Phone verification is not configured yet");
-  }
-  const credentials = Buffer.from(`${env.twilioAccountSid}:${env.twilioAuthToken}`).toString("base64");
-  const response = await fetch(
-    `https://verify.twilio.com/v2/Services/${encodeURIComponent(env.twilioVerifyServiceSid)}/Verifications`,
-    {
-      method: "POST",
-      headers: { Authorization: `Basic ${credentials}`, "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ To: phone, Channel: "sms" }),
-      signal: AbortSignal.timeout(10000),
-    }
-  );
-  if (!response.ok) throw new ApiError(response.status === 429 ? 429 : 502, "Could not send a code. Check the number and try again.");
-  return { sent: true, message: "Verification code sent" };
+  return otpProvider.sendPhoneCode(phone);
 }
 
 async function checkPhoneCode({ phone, code, fullName }) {
-  if (!env.twilioAccountSid || !env.twilioAuthToken || !env.twilioVerifyServiceSid) {
-    throw new ApiError(503, "Phone verification is not configured yet");
-  }
-  const credentials = Buffer.from(`${env.twilioAccountSid}:${env.twilioAuthToken}`).toString("base64");
-  const response = await fetch(
-    `https://verify.twilio.com/v2/Services/${encodeURIComponent(env.twilioVerifyServiceSid)}/VerificationCheck`,
-    {
-      method: "POST",
-      headers: { Authorization: `Basic ${credentials}`, "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ To: phone, Code: code }),
-      signal: AbortSignal.timeout(10000),
-    }
-  );
-  if (!response.ok) {
-    if (response.status === 429) throw new ApiError(429, "Too many code attempts. Please wait before trying again.");
-    throw new ApiError(401, "Invalid or expired verification code");
-  }
-  const verification = await response.json();
-  if (verification.status !== "approved") throw new ApiError(401, "Invalid or expired verification code");
+  await otpProvider.verifyPhoneCode(phone, code);
 
   const client = await pool.connect();
   let user;
@@ -256,15 +241,22 @@ function getProviderSettings() {
     googleClientId: env.googleClientId || null,
     appleClientId: appleReady ? env.appleClientId : null,
     appleRedirectUrl: appleReady ? env.appleRedirectUrl : null,
-    phoneOtpEnabled: Boolean(env.twilioAccountSid && env.twilioAuthToken && env.twilioVerifyServiceSid),
+    phoneOtpEnabled: otpProvider.isConfigured(),
   };
 }
 
 async function refresh(refreshToken) {
   let payload;
   try {
-    payload = jwt.verify(refreshToken, env.jwtRefreshSecret);
+    payload = jwt.verify(refreshToken, env.jwtRefreshSecret, {
+      algorithms: ["HS256"],
+      issuer: env.jwtIssuer,
+      audience: env.jwtAudience,
+    });
   } catch {
+    throw new ApiError(401, "Invalid or expired refresh token");
+  }
+  if (payload.tokenType !== "refresh" || typeof payload.sub !== "string" || typeof payload.jti !== "string") {
     throw new ApiError(401, "Invalid or expired refresh token");
   }
 
@@ -377,6 +369,9 @@ async function updateProfile(userId, input) {
 }
 
 async function updatePassword(userId, { currentPassword, newPassword }) {
+  if (bcrypt.truncates(newPassword) || (currentPassword && bcrypt.truncates(currentPassword))) {
+    throw new ApiError(400, "Password must be at most 72 UTF-8 bytes");
+  }
   const result = await pool.query("SELECT password_hash FROM users WHERE id=$1", [userId]);
   const user = result.rows[0];
   if (!user) throw new ApiError(404, "User not found");
@@ -398,6 +393,7 @@ async function logoutAll(userId) {
 }
 
 async function createUser(input) {
+  if (bcrypt.truncates(input.password)) throw new ApiError(400, "Password must be at most 72 UTF-8 bytes");
   const passwordHash = await bcrypt.hash(input.password, 12);
   const result = await pool.query(
     `INSERT INTO users(full_name, email, phone, password_hash, role, status)

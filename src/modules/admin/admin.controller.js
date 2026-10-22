@@ -26,4 +26,21 @@ const archiveModule = asyncHandler(async (req, res) => {
   success(res, null, "Learning module archived");
 });
 
-module.exports = { dashboard, listStudents, updateStudentStatus, listEnrollments, saveEnrollment, listModules, createModule, updateModule, archiveModule };
+const listMaterials = asyncHandler(async (req, res) => success(res, await service.listMaterials(req.params.courseId), "PDF materials fetched"));
+const startMaterialUpload = asyncHandler(async (req, res) => success(res, await service.startMaterialUpload(req.params.courseId, req.body, req.user.sub), "Secure PDF upload created", 201));
+const completeMaterialUpload = asyncHandler(async (req, res) => success(res, await service.completeMaterialUpload(req.params.id, req.body, req.user.sub), "PDF material published"));
+const updateMaterial = asyncHandler(async (req, res) => success(res, await service.updateMaterial(req.params.id, req.body, req.user.sub), "PDF material updated"));
+const archiveMaterial = asyncHandler(async (req, res) => {
+  await service.archiveMaterial(req.params.id, req.user.sub);
+  success(res, null, "PDF material archived");
+});
+const deleteMaterial = asyncHandler(async (req, res) => {
+  await service.deleteMaterial(req.params.id, req.user.sub);
+  success(res, null, "PDF material permanently deleted");
+});
+
+module.exports = {
+  dashboard, listStudents, updateStudentStatus, listEnrollments, saveEnrollment,
+  listModules, createModule, updateModule, archiveModule, listMaterials,
+  startMaterialUpload, completeMaterialUpload, updateMaterial, archiveMaterial, deleteMaterial,
+};

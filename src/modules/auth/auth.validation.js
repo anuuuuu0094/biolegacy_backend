@@ -1,8 +1,16 @@
 const Joi = require("joi");
 
+const password = (minimum = 8) => Joi.string()
+  .min(minimum)
+  .max(128)
+  .custom((value, helpers) => (
+    Buffer.byteLength(value, "utf8") <= 72 ? value : helpers.error("password.tooLong")
+  ))
+  .messages({ "password.tooLong": "Password must be at most 72 UTF-8 bytes" });
+
 const loginSchema = Joi.object({
-  email: Joi.string().email().required(),
-  password: Joi.string().min(8).required(),
+  email: Joi.string().email().max(254).required(),
+  password: password().required(),
 });
 
 const refreshSchema = Joi.object({
@@ -13,7 +21,7 @@ const createUserSchema = Joi.object({
   fullName: Joi.string().min(2).max(120).required(),
   email: Joi.string().email().required(),
   phone: Joi.string().pattern(/^[0-9]{10}$/).allow("", null),
-  password: Joi.string().min(8).required(),
+  password: password().required(),
   role: Joi.string().valid("TEACHER_ADMIN", "STUDENT").default("STUDENT"),
   status: Joi.string().valid("ACTIVE", "PENDING", "SUSPENDED").default("ACTIVE"),
 });
@@ -60,12 +68,18 @@ const updateProfileSchema = Joi.object({
 });
 
 const updatePasswordSchema = Joi.object({
-  currentPassword: Joi.string().max(72).allow("", null),
-  newPassword: Joi.string().min(8).max(72).required(),
+  currentPassword: password().allow("", null),
+  newPassword: password().required(),
+});
+
+const adminGateSchema = Joi.object({
+  accessKey: Joi.string().min(1).max(512).required(),
+  clientKey: Joi.string().hex().length(64).required(),
 });
 
 module.exports = {
   loginSchema, refreshSchema, createUserSchema,
   googleLoginSchema, appleLoginSchema, sendPhoneCodeSchema, checkPhoneCodeSchema,
   updateProfileSchema, updatePasswordSchema,
+  adminGateSchema,
 };

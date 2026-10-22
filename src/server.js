@@ -38,7 +38,7 @@ async function migrateWithRetry() {
 }
 
 async function start() {
-  await migrateWithRetry();
+  if (env.runMigrationsOnStart) await migrateWithRetry();
 
   app.listen(env.port, () => {
     console.log(`BioLegacy API running on port ${env.port}`);

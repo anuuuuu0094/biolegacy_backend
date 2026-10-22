@@ -100,7 +100,7 @@ const courses = [
 ];
 
 async function seed() {
-  if (!adminPassword || adminPassword.length < 16) {
+  if (!adminPassword || adminPassword.length < 16 || bcrypt.truncates(adminPassword)) {
     throw new Error("Set SEED_ADMIN_PASSWORD to a unique password of at least 16 characters before seeding");
   }
   await migrate();

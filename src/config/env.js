@@ -5,7 +5,12 @@ const crypto = require("crypto");
 dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 const nodeEnv = process.env.NODE_ENV || "development";
-const developmentAdminPortalKey = "biolegacy-local-admin-portal-key";
+const developmentAdminPortalAccessKey = "biolegacy-local-admin-access-key";
+const developmentAdminPortalSigningKey = "biolegacy-local-admin-signing-key";
+const legacyDevelopmentAdminPortalKey = nodeEnv === "production" ? "" : (process.env.ADMIN_PORTAL_KEY || "").trim();
+const derivedDevelopmentSigningKey = legacyDevelopmentAdminPortalKey
+  ? crypto.createHash("sha256").update(`biolegacy.admin.signing.${legacyDevelopmentAdminPortalKey}`).digest("hex")
+  : developmentAdminPortalSigningKey;
 const productionFrontendUrl = "https://biolegacy.vercel.app";
 const defaultFrontendUrl = nodeEnv === "production"
   ? productionFrontendUrl
@@ -18,6 +23,18 @@ const frontendUrls = [...new Set([
   ...configuredFrontendUrls,
   ...(nodeEnv === "production" ? [productionFrontendUrl] : []),
 ])];
+const positiveNumber = (value, fallback) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+const booleanValue = (value, fallback) => {
+  if (value == null || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+};
+const boundedInteger = (value, fallback, min, max) => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+};
 
 const env = {
   nodeEnv,
@@ -26,9 +43,12 @@ const env = {
   frontendUrls,
   jwtAccessSecret: process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || crypto.randomBytes(32).toString("hex"),
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || crypto.randomBytes(32).toString("hex"),
+  jwtIssuer: (process.env.JWT_ISSUER || "biolegacy-api").trim(),
+  jwtAudience: (process.env.JWT_AUDIENCE || "biolegacy-web").trim(),
   accessTokenTtl: process.env.ACCESS_TOKEN_TTL || "15m",
   refreshTokenTtl: process.env.REFRESH_TOKEN_TTL || "30d",
-  adminPortalKey: (process.env.ADMIN_PORTAL_KEY || (nodeEnv === "production" ? "" : developmentAdminPortalKey)).trim(),
+  adminPortalAccessKey: (process.env.ADMIN_PORTAL_ACCESS_KEY || legacyDevelopmentAdminPortalKey || (nodeEnv === "production" ? "" : developmentAdminPortalAccessKey)).trim(),
+  adminPortalSigningKey: (process.env.ADMIN_PORTAL_SIGNING_KEY || (nodeEnv === "production" ? "" : derivedDevelopmentSigningKey)).trim(),
   databaseUrl: process.env.DATABASE_URL || process.env.Db_URL,
   dbConnectionTimeoutMs: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 15000),
   dbQueryTimeoutMs: Number(process.env.DB_QUERY_TIMEOUT_MS || 30000),
@@ -38,6 +58,10 @@ const env = {
   appleTeamId: process.env.APPLE_TEAM_ID || "",
   appleKeyId: process.env.APPLE_KEY_ID || "",
   applePrivateKey: (process.env.APPLE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+  otpProvider: (process.env.OTP_PROVIDER || (process.env.TWO_FACTOR_API_KEY ? "2factor" : "twilio")).trim().toLowerCase(),
+  twoFactorApiKey: process.env.TWO_FACTOR_API_KEY || "",
+  twoFactorOtpTemplate: process.env.TWO_FACTOR_OTP_TEMPLATE || "",
+  twoFactorApiBaseUrl: (process.env.TWO_FACTOR_API_BASE_URL || "https://2factor.in/API/V1").replace(/\/+$/, ""),
   twilioAccountSid: process.env.TWILIO_ACCOUNT_SID || "",
   twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || "",
   twilioVerifyServiceSid: process.env.TWILIO_VERIFY_SERVICE_SID || "",
@@ -45,6 +69,17 @@ const env = {
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || "",
   razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || "",
   razorpayApiBaseUrl: process.env.RAZORPAY_API_BASE_URL || "https://api.razorpay.com/v1",
+  r2AccountId: process.env.R2_ACCOUNT_ID || "",
+  r2AccessKeyId: process.env.R2_ACCESS_KEY_ID || "",
+  r2SecretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
+  r2BucketName: process.env.R2_BUCKET_NAME || "",
+  r2Endpoint: (process.env.R2_ENDPOINT || "").replace(/\/+$/, ""),
+  pdfMaxFileSizeMb: Math.max(1, positiveNumber(process.env.PDF_MAX_FILE_SIZE_MB, 25)),
+  pdfStorageQuotaMb: Math.max(1, positiveNumber(process.env.PDF_STORAGE_QUOTA_MB, 9000)),
+  pdfSignedUrlTtlSeconds: Math.min(3600, Math.max(60, positiveNumber(process.env.PDF_SIGNED_URL_TTL_SECONDS, 600))),
+  trustProxyHops: boundedInteger(process.env.TRUST_PROXY_HOPS, nodeEnv === "production" ? 1 : 0, 0, 5),
+  rateLimitStore: (process.env.RATE_LIMIT_STORE || (nodeEnv === "production" ? "postgres" : "memory")).trim().toLowerCase(),
+  runMigrationsOnStart: booleanValue(process.env.RUN_MIGRATIONS_ON_START, nodeEnv !== "production"),
   db: {
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
@@ -55,6 +90,9 @@ const env = {
 };
 
 env.razorpayConfigured = Boolean(env.razorpayKeyId && env.razorpayKeySecret && env.razorpayWebhookSecret);
+env.pdfStorageConfigured = Boolean(
+  env.r2AccountId && env.r2AccessKeyId && env.r2SecretAccessKey && env.r2BucketName
+);
 
 if (env.nodeEnv === "production") {
   const missing = [];
@@ -68,9 +106,35 @@ if (env.nodeEnv === "production") {
   if (!process.env.JWT_REFRESH_SECRET) {
     missing.push("JWT_REFRESH_SECRET");
   }
+  if (!env.adminPortalAccessKey) missing.push("ADMIN_PORTAL_ACCESS_KEY");
+  if (!env.adminPortalSigningKey) missing.push("ADMIN_PORTAL_SIGNING_KEY");
 
   if (missing.length) {
     throw new Error(`Missing production environment variables: ${missing.join(", ")}`);
+  }
+
+  const weakSecret = (value) => value.length < 32 || /replace|change|example|password|secret/i.test(value);
+  if (weakSecret(env.jwtAccessSecret)) throw new Error("JWT_ACCESS_SECRET must be a random value of at least 32 characters");
+  if (weakSecret(env.jwtRefreshSecret)) throw new Error("JWT_REFRESH_SECRET must be a random value of at least 32 characters");
+  if (env.jwtAccessSecret === env.jwtRefreshSecret) throw new Error("JWT access and refresh secrets must be different");
+  if (weakSecret(env.adminPortalAccessKey)) throw new Error("ADMIN_PORTAL_ACCESS_KEY must be a random value of at least 32 characters");
+  if (weakSecret(env.adminPortalSigningKey)) throw new Error("ADMIN_PORTAL_SIGNING_KEY must be a random value of at least 32 characters");
+  if (env.adminPortalAccessKey === env.adminPortalSigningKey) throw new Error("Admin portal access and signing keys must be different");
+  if (!env.jwtIssuer || !env.jwtAudience) throw new Error("JWT_ISSUER and JWT_AUDIENCE must not be empty");
+  for (const frontendUrl of env.frontendUrls) {
+    let parsed;
+    try { parsed = new URL(frontendUrl); } catch { throw new Error(`Invalid FRONTEND_URL origin: ${frontendUrl}`); }
+    if (parsed.origin !== frontendUrl || parsed.protocol !== "https:") {
+      throw new Error(`Production FRONTEND_URL must be an HTTPS origin without a path: ${frontendUrl}`);
+    }
+  }
+  if (!['memory', 'postgres'].includes(env.rateLimitStore)) throw new Error("RATE_LIMIT_STORE must be memory or postgres");
+  if (env.rateLimitStore === "memory") {
+    throw new Error("Production rate limiting must use the shared postgres store");
+  }
+  const rotationCommand = /rotate-admin-password\.js$/i.test(process.argv[1] || "");
+  if (process.env.NEW_ADMIN_PASSWORD && !rotationCommand) {
+    throw new Error("Remove NEW_ADMIN_PASSWORD after completing the one-time password rotation");
   }
 }
 

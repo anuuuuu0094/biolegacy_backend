@@ -20,6 +20,19 @@ const moduleSchema = Joi.object({
   sortOrder: Joi.number().integer().min(0).default(0),
   published: Joi.boolean().default(true),
 });
+const materialUploadSchema = Joi.object({
+  fileName: Joi.string().trim().min(5).max(255).pattern(/\.pdf$/i).required(),
+  fileSize: Joi.number().integer().min(5).required(),
+  mimeType: Joi.string().valid("application/pdf", "application/x-pdf").required(),
+});
+const materialSchema = Joi.object({
+  title: Joi.string().trim().min(2).max(220).required(),
+  description: Joi.string().trim().max(2000).allow("", null),
+  moduleId: Joi.string().uuid().allow("", null),
+  sortOrder: Joi.number().integer().min(0).default(0),
+  downloadable: Joi.boolean().default(true),
+  published: Joi.boolean().default(false),
+});
 
 router.get("/dashboard", authenticate, authorize("TEACHER_ADMIN"), controller.dashboard);
 router.get("/students", authenticate, authorize("TEACHER_ADMIN"), controller.listStudents);
@@ -30,5 +43,11 @@ router.get("/courses/:courseId/modules", authenticate, authorize("TEACHER_ADMIN"
 router.post("/courses/:courseId/modules", authenticate, authorize("TEACHER_ADMIN"), validate(courseIdSchema, "params"), validate(moduleSchema), controller.createModule);
 router.put("/modules/:id", authenticate, authorize("TEACHER_ADMIN"), validate(idSchema, "params"), validate(moduleSchema), controller.updateModule);
 router.delete("/modules/:id", authenticate, authorize("TEACHER_ADMIN"), validate(idSchema, "params"), controller.archiveModule);
+router.get("/courses/:courseId/materials", authenticate, authorize("TEACHER_ADMIN"), validate(courseIdSchema, "params"), controller.listMaterials);
+router.post("/courses/:courseId/materials/uploads", authenticate, authorize("TEACHER_ADMIN"), validate(courseIdSchema, "params"), validate(materialUploadSchema), controller.startMaterialUpload);
+router.post("/materials/:id/complete", authenticate, authorize("TEACHER_ADMIN"), validate(idSchema, "params"), validate(materialSchema), controller.completeMaterialUpload);
+router.put("/materials/:id", authenticate, authorize("TEACHER_ADMIN"), validate(idSchema, "params"), validate(materialSchema), controller.updateMaterial);
+router.delete("/materials/:id", authenticate, authorize("TEACHER_ADMIN"), validate(idSchema, "params"), controller.archiveMaterial);
+router.delete("/materials/:id/permanent", authenticate, authorize("TEACHER_ADMIN"), validate(idSchema, "params"), controller.deleteMaterial);
 
 module.exports = router;

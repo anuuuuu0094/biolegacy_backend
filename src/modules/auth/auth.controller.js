@@ -2,22 +2,30 @@ const asyncHandler = require("../../utils/asyncHandler");
 const { success } = require("../../utils/apiResponse");
 const authService = require("./auth.service");
 
+function preventCaching(res) {
+  res.set("Cache-Control", "no-store");
+  res.set("Pragma", "no-cache");
+}
+
 const providers = asyncHandler(async (req, res) => {
   void req;
   success(res, authService.getProviderSettings(), "Sign-in providers fetched");
 });
 
 const login = asyncHandler(async (req, res) => {
+  preventCaching(res);
   const data = await authService.login(req.body);
   success(res, data, "Login successful");
 });
 
 const adminLogin = asyncHandler(async (req, res) => {
+  preventCaching(res);
   const data = await authService.adminLogin(req.body);
   success(res, data, "Administrator login successful");
 });
 
 const refresh = asyncHandler(async (req, res) => {
+  preventCaching(res);
   const data = await authService.refresh(req.body.refreshToken);
   success(res, data, "Token refreshed");
 });
@@ -53,11 +61,13 @@ const createUser = asyncHandler(async (req, res) => {
 });
 
 const googleLogin = asyncHandler(async (req, res) => {
+  preventCaching(res);
   const data = await authService.loginWithIdentity("google", req.body);
   success(res, data, "Google sign-in successful");
 });
 
 const appleLogin = asyncHandler(async (req, res) => {
+  preventCaching(res);
   const data = await authService.loginWithIdentity("apple", req.body);
   success(res, data, "Apple sign-in successful");
 });
@@ -67,6 +77,7 @@ const sendPhoneCode = asyncHandler(async (req, res) => {
 });
 
 const checkPhoneCode = asyncHandler(async (req, res) => {
+  preventCaching(res);
   success(res, await authService.checkPhoneCode(req.body), "Phone verified and signed in");
 });
 
