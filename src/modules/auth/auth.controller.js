@@ -1,6 +1,7 @@
 const asyncHandler = require("../../utils/asyncHandler");
 const { success } = require("../../utils/apiResponse");
 const authService = require("./auth.service");
+const { getRequestDevice } = require("./device");
 
 function preventCaching(res) {
   res.set("Cache-Control", "no-store");
@@ -14,13 +15,13 @@ const providers = asyncHandler(async (req, res) => {
 
 const login = asyncHandler(async (req, res) => {
   preventCaching(res);
-  const data = await authService.login(req.body);
+  const data = await authService.login(req.body, getRequestDevice(req));
   success(res, data, "Login successful");
 });
 
 const adminLogin = asyncHandler(async (req, res) => {
   preventCaching(res);
-  const data = await authService.adminLogin(req.body);
+  const data = await authService.adminLogin(req.body, getRequestDevice(req));
   success(res, data, "Administrator login successful");
 });
 
@@ -62,13 +63,13 @@ const createUser = asyncHandler(async (req, res) => {
 
 const googleLogin = asyncHandler(async (req, res) => {
   preventCaching(res);
-  const data = await authService.loginWithIdentity("google", req.body);
+  const data = await authService.loginWithIdentity("google", req.body, getRequestDevice(req));
   success(res, data, "Google sign-in successful");
 });
 
 const appleLogin = asyncHandler(async (req, res) => {
   preventCaching(res);
-  const data = await authService.loginWithIdentity("apple", req.body);
+  const data = await authService.loginWithIdentity("apple", req.body, getRequestDevice(req));
   success(res, data, "Apple sign-in successful");
 });
 
@@ -78,7 +79,7 @@ const sendPhoneCode = asyncHandler(async (req, res) => {
 
 const checkPhoneCode = asyncHandler(async (req, res) => {
   preventCaching(res);
-  success(res, await authService.checkPhoneCode(req.body), "Phone verified and signed in");
+  success(res, await authService.checkPhoneCode(req.body, getRequestDevice(req)), "Phone verified and signed in");
 });
 
 module.exports = {

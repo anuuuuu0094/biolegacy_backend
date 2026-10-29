@@ -17,10 +17,18 @@ const commerceRoutes = require("./modules/commerce/commerce.routes");
 const paymentRoutes = require("./modules/payments/payment.routes");
 const adminCommerceRoutes = require("./modules/adminCommerce/adminCommerce.routes");
 
+router.get("/live", (req, res) => {
+  success(res, { status: "ok", uptimeSeconds: Math.floor(process.uptime()) }, "API is live");
+});
+
 router.get("/health", async (req, res, next) => {
   try {
     await pool.query("SELECT 1");
-    success(res, { status: "ok", database: "connected" }, "API is healthy");
+    success(res, {
+      status: "ok",
+      database: "connected",
+      pool: { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount },
+    }, "API is healthy");
   } catch (error) {
     next(error);
   }

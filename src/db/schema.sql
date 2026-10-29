@@ -52,10 +52,26 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   token_hash TEXT NOT NULL UNIQUE,
+  device_type TEXT NOT NULL DEFAULT 'DESKTOP' CHECK (device_type IN ('DESKTOP', 'MOBILE')),
+  user_agent TEXT,
   expires_at TIMESTAMPTZ NOT NULL,
   revoked_at TIMESTAMPTZ,
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Keep existing installations compatible; migration 007 revokes legacy sessions
+-- before enforcing one active session per device category.
+ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS device_type TEXT NOT NULL DEFAULT 'DESKTOP';
+ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS user_agent TEXT;
+ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+DO $$ BEGIN
+  ALTER TABLE refresh_tokens
+    ADD CONSTRAINT refresh_tokens_device_type_check
+    CHECK (device_type IN ('DESKTOP', 'MOBILE'));
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
 
 CREATE TABLE IF NOT EXISTS courses (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -421,6 +437,7 @@ CREATE TABLE IF NOT EXISTS test_attempts (
 CREATE UNIQUE INDEX IF NOT EXISTS test_attempts_one_active_idx ON test_attempts(test_id, user_id) WHERE status='ACTIVE';
 CREATE INDEX IF NOT EXISTS test_attempts_user_idx ON test_attempts(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS test_attempts_test_status_idx ON test_attempts(test_id, status, submitted_at DESC);
+CREATE INDEX IF NOT EXISTS test_attempts_due_idx ON test_attempts(expires_at) WHERE status='ACTIVE';
 
 CREATE TABLE IF NOT EXISTS attempt_questions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -473,6 +490,7 @@ CREATE TABLE IF NOT EXISTS test_results (
   generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS test_results_rank_idx ON test_results(test_id, score DESC, accuracy DESC, generated_at ASC);
+CREATE INDEX IF NOT EXISTS test_results_leaderboard_idx ON test_results(test_id, score DESC, accuracy DESC);
 CREATE INDEX IF NOT EXISTS test_results_user_idx ON test_results(user_id, generated_at DESC);
 
 CREATE TABLE IF NOT EXISTS question_results (

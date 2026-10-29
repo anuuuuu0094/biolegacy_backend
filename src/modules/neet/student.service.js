@@ -97,7 +97,7 @@ async function hydrateAttempt(attemptId,userId) {
 async function startAttempt(testId,userId) {
   const client=await pool.connect(); let attemptId;
   try {
-    await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+    await client.query("BEGIN");
     await client.query("SELECT id FROM users WHERE id=$1 FOR UPDATE",[userId]);
     const found=await client.query(`SELECT t.*,ts.lifecycle_status AS series_status,ts.access_type,ts.course_id
       FROM tests t JOIN LATERAL (
@@ -105,7 +105,7 @@ async function startAttempt(testId,userId) {
         FROM test_series_tests tst JOIN test_series mapped ON mapped.id=tst.series_id
         WHERE tst.test_id=t.id AND tst.is_active=true AND mapped.lifecycle_status='PUBLISHED' AND mapped.published=true
         ORDER BY (mapped.id=t.series_id) DESC,tst.sort_order LIMIT 1
-      ) ts ON true WHERE t.id=$1 FOR UPDATE OF t`,[testId]);
+      ) ts ON true WHERE t.id=$1`,[testId]);
     const test=found.rows[0]; if(!test) throw new ApiError(404,"Test not found");
     const active=await client.query("SELECT * FROM test_attempts WHERE test_id=$1 AND user_id=$2 AND status='ACTIVE' FOR UPDATE",[testId,userId]);
     if(active.rows[0] && new Date(active.rows[0].expires_at)>new Date()) {
@@ -126,28 +126,55 @@ async function startAttempt(testId,userId) {
     const snapshot={testId:test.id,name:test.name,code:test.code,version:test.version,durationMinutes:test.duration_minutes,resultVisibility:test.result_visibility,explanationVisibility:test.explanation_visibility,answerKeyVisibility:test.answer_key_visibility,leaderboardEnabled:test.leaderboard_enabled,integritySettings:test.integrity_settings};
     const created=await client.query("INSERT INTO test_attempts(test_id,user_id,attempt_number,expires_at,test_snapshot) VALUES($1,$2,$3,NOW()+($4::text||' minutes')::interval,$5) RETURNING id",[testId,userId,count.rows[0].total+1,test.duration_minutes,snapshot]);
     attemptId=created.rows[0].id;
-    for(let index=0;index<questions.length;index+=1){
-      const q=questions[index];
+    const attemptQuestions=questions.map((q,index)=>{
       const opts=test.shuffle_options?shuffle(q.options):q.options;
-      const qSnapshot={questionText:q.question_text,imageUrl:q.image_url,explanation:q.explanation,solution:q.solution,hint:q.hint,options:q.options.map((o)=>({id:o.id,optionText:o.optionText,imageUrl:o.imageUrl})),correctOptionIds:q.options.filter((o)=>o.isCorrect).map((o)=>o.id)};
-      await client.query(`INSERT INTO attempt_questions(attempt_id,source_question_id,section_name,subject,chapter,topic,difficulty,question_type,snapshot,sort_order,option_order,marks,incorrect_marks,unanswered_marks) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,[attemptId,q.id,q.section_name,q.subject,q.chapter,q.topic,q.difficulty,q.question_type,qSnapshot,index,JSON.stringify(opts.map((o)=>o.id)),q.override_marks??q.marks??test.correct_marks,q.override_incorrect??-Number(q.negative_marks??Math.abs(test.incorrect_marks)),test.unanswered_marks]);
-    }
+      return {
+        source_question_id:q.id,section_name:q.section_name,subject:q.subject,chapter:q.chapter,topic:q.topic,
+        difficulty:q.difficulty,question_type:q.question_type,
+        snapshot:{questionText:q.question_text,imageUrl:q.image_url,explanation:q.explanation,solution:q.solution,hint:q.hint,options:q.options.map((o)=>({id:o.id,optionText:o.optionText,imageUrl:o.imageUrl})),correctOptionIds:q.options.filter((o)=>o.isCorrect).map((o)=>o.id)},
+        sort_order:index,option_order:opts.map((o)=>o.id),marks:Number(q.override_marks??q.marks??test.correct_marks),
+        incorrect_marks:Number(q.override_incorrect??-Number(q.negative_marks??Math.abs(test.incorrect_marks))),unanswered_marks:Number(test.unanswered_marks),
+      };
+    });
+    await client.query(`INSERT INTO attempt_questions(attempt_id,source_question_id,section_name,subject,chapter,topic,difficulty,question_type,snapshot,sort_order,option_order,marks,incorrect_marks,unanswered_marks)
+      SELECT $1,x.source_question_id,x.section_name,x.subject,x.chapter,x.topic,x.difficulty,x.question_type,x.snapshot,x.sort_order,x.option_order,x.marks,x.incorrect_marks,x.unanswered_marks
+      FROM jsonb_to_recordset($2::jsonb) AS x(source_question_id uuid,section_name text,subject text,chapter text,topic text,difficulty text,question_type text,snapshot jsonb,sort_order int,option_order jsonb,marks numeric,incorrect_marks numeric,unanswered_marks numeric)`,[attemptId,JSON.stringify(attemptQuestions)]);
     await client.query("COMMIT");
   } catch(error){await client.query("ROLLBACK"); if(error.code==="40001"||error.code==="23505") throw new ApiError(409,"A test attempt was started in another request. Open the active attempt."); throw error;} finally{client.release();}
   return hydrateAttempt(attemptId,userId);
 }
 
-async function upsertAnswerWithClient(client,attempt,answer) {
-  const question=await client.query("SELECT option_order FROM attempt_questions WHERE id=$1 AND attempt_id=$2",[answer.attemptQuestionId,attempt.id]);
-  if(!question.rows[0]) throw new ApiError(400,"Question does not belong to this attempt");
-  const valid=new Set(question.rows[0].option_order.map(String));
-  if(answer.selectedOptionIds.some((id)=>!valid.has(String(id)))) throw new ApiError(400,"One or more selected options are invalid");
-  await client.query(`INSERT INTO attempt_answers(attempt_id,attempt_question_id,selected_option_ids,visited,marked_for_review,answered_at,time_spent_seconds) VALUES($1,$2,$3,$4,$5,CASE WHEN jsonb_array_length($3::jsonb)>0 THEN NOW() END,$6) ON CONFLICT(attempt_id,attempt_question_id) DO UPDATE SET selected_option_ids=EXCLUDED.selected_option_ids,visited=EXCLUDED.visited,marked_for_review=EXCLUDED.marked_for_review,answered_at=CASE WHEN jsonb_array_length(EXCLUDED.selected_option_ids)>0 THEN NOW() END,time_spent_seconds=GREATEST(attempt_answers.time_spent_seconds,EXCLUDED.time_spent_seconds),updated_at=NOW()`,[attempt.id,answer.attemptQuestionId,JSON.stringify(answer.selectedOptionIds),answer.visited,answer.markedForReview,answer.timeSpentSeconds]);
+async function upsertAnswersWithClient(client,attempt,answers) {
+  if(!answers.length)return;
+  const ids=answers.map((answer)=>answer.attemptQuestionId);
+  const questions=await client.query("SELECT id,option_order FROM attempt_questions WHERE attempt_id=$1 AND id=ANY($2::uuid[])",[attempt.id,ids]);
+  if(questions.rowCount!==answers.length)throw new ApiError(400,"One or more questions do not belong to this attempt");
+  const byId=new Map(questions.rows.map((row)=>[String(row.id),new Set(row.option_order.map(String))]));
+  for(const answer of answers){
+    const valid=byId.get(String(answer.attemptQuestionId));
+    if(!valid||answer.selectedOptionIds.some((id)=>!valid.has(String(id))))throw new ApiError(400,"One or more selected options are invalid");
+  }
+  const rows=answers.map((answer)=>({attempt_question_id:answer.attemptQuestionId,selected_option_ids:answer.selectedOptionIds,visited:answer.visited,marked_for_review:answer.markedForReview,time_spent_seconds:answer.timeSpentSeconds}));
+  await client.query(`INSERT INTO attempt_answers(attempt_id,attempt_question_id,selected_option_ids,visited,marked_for_review,answered_at,time_spent_seconds)
+    SELECT $1,x.attempt_question_id,x.selected_option_ids,x.visited,x.marked_for_review,CASE WHEN jsonb_array_length(x.selected_option_ids)>0 THEN NOW() END,x.time_spent_seconds
+    FROM jsonb_to_recordset($2::jsonb) AS x(attempt_question_id uuid,selected_option_ids jsonb,visited boolean,marked_for_review boolean,time_spent_seconds int)
+    ON CONFLICT(attempt_id,attempt_question_id) DO UPDATE SET selected_option_ids=EXCLUDED.selected_option_ids,visited=EXCLUDED.visited,marked_for_review=EXCLUDED.marked_for_review,answered_at=CASE WHEN jsonb_array_length(EXCLUDED.selected_option_ids)>0 THEN NOW() END,time_spent_seconds=GREATEST(attempt_answers.time_spent_seconds,EXCLUDED.time_spent_seconds),updated_at=NOW()`,[attempt.id,JSON.stringify(rows)]);
 }
 
 async function saveAnswer(attemptId,userId,answer) {
-  const client=await pool.connect();
-  try{await client.query("BEGIN");const found=await client.query("SELECT * FROM test_attempts WHERE id=$1 AND user_id=$2 FOR UPDATE",[attemptId,userId]);const attempt=found.rows[0];if(!attempt)throw new ApiError(404,"Attempt not found");const entitlement=await accessService.canAccessTest(userId,attempt.test_id,client);if(!entitlement.allowed)throw new ApiError(403,"Test access is no longer active",[entitlement.reason]);if(attempt.status!=="ACTIVE")throw new ApiError(409,"This attempt is no longer active");if(new Date(attempt.expires_at)<=new Date())throw new ApiError(409,"Time has expired. Submit the attempt to see the result.");await upsertAnswerWithClient(client,attempt,answer);await client.query("COMMIT");return {saved:true,savedAt:new Date().toISOString(),attemptQuestionId:answer.attemptQuestionId};}catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
+  const selected=JSON.stringify(answer.selectedOptionIds);
+  const result=await pool.query(`INSERT INTO attempt_answers(attempt_id,attempt_question_id,selected_option_ids,visited,marked_for_review,answered_at,time_spent_seconds)
+    SELECT ta.id,aq.id,$3::jsonb,$4,$5,CASE WHEN jsonb_array_length($3::jsonb)>0 THEN NOW() END,$6
+    FROM test_attempts ta JOIN attempt_questions aq ON aq.attempt_id=ta.id AND aq.id=$7
+    WHERE ta.id=$1 AND ta.user_id=$2 AND ta.status='ACTIVE' AND ta.expires_at>NOW()
+      AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text($3::jsonb) choice WHERE NOT aq.option_order ? choice.value)
+    ON CONFLICT(attempt_id,attempt_question_id) DO UPDATE SET selected_option_ids=EXCLUDED.selected_option_ids,visited=EXCLUDED.visited,marked_for_review=EXCLUDED.marked_for_review,answered_at=CASE WHEN jsonb_array_length(EXCLUDED.selected_option_ids)>0 THEN NOW() END,time_spent_seconds=GREATEST(attempt_answers.time_spent_seconds,EXCLUDED.time_spent_seconds),updated_at=NOW()
+    RETURNING attempt_question_id`,[attemptId,userId,selected,answer.visited,answer.markedForReview,answer.timeSpentSeconds,answer.attemptQuestionId]);
+  if(!result.rows[0]){
+    const reason=await pool.query(`SELECT ta.status,ta.expires_at,aq.id AS question_id,aq.option_order FROM test_attempts ta LEFT JOIN attempt_questions aq ON aq.attempt_id=ta.id AND aq.id=$3 WHERE ta.id=$1 AND ta.user_id=$2`,[attemptId,userId,answer.attemptQuestionId]);
+    const row=reason.rows[0];if(!row)throw new ApiError(404,"Attempt not found");if(!row.question_id)throw new ApiError(400,"Question does not belong to this attempt");if(row.status!=="ACTIVE")throw new ApiError(409,"This attempt is no longer active");if(new Date(row.expires_at)<=new Date())throw new ApiError(409,"Time has expired. Submit the attempt to see the result.");throw new ApiError(400,"One or more selected options are invalid");
+  }
+  return {saved:true,savedAt:new Date().toISOString(),attemptQuestionId:answer.attemptQuestionId};
 }
 
 function visibilityAllowed(mode,test,now=new Date()) { if(mode==="NEVER") return false; if(mode==="MANUAL_RELEASE") return Boolean(test.result_released_at); if(mode==="AFTER_TEST_END") return Boolean(test.ends_at&&new Date(test.ends_at)<=now)||Boolean(test.result_released_at); return true; }
@@ -160,22 +187,30 @@ async function finalizeWithClient(client,attempt,autoSubmitted) {
   const submittedAt=new Date(); const timeTaken=Math.max(0,Math.min(Math.floor((submittedAt-new Date(attempt.started_at))/1000),Math.floor((new Date(attempt.expires_at)-new Date(attempt.started_at))/1000)));
   await client.query(`UPDATE test_attempts SET status=$2,submitted_at=$3,auto_submitted=$4,score=$5,max_score=$6,percentage=$7,accuracy=$8,correct_count=$9,incorrect_count=$10,unanswered_count=$11,time_taken_seconds=$12,updated_at=NOW() WHERE id=$1`,[attempt.id,autoSubmitted?"EXPIRED":"SUBMITTED",submittedAt,autoSubmitted,evaluated.score,evaluated.maxScore,evaluated.percentage,evaluated.accuracy,evaluated.correct,evaluated.incorrect,evaluated.unanswered,timeTaken]);
   const result=await client.query(`INSERT INTO test_results(attempt_id,test_id,user_id,score,max_score,percentage,accuracy,correct_count,incorrect_count,unanswered_count,attempted_count,breakdown) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,[attempt.id,attempt.test_id,attempt.user_id,evaluated.score,evaluated.maxScore,evaluated.percentage,evaluated.accuracy,evaluated.correct,evaluated.incorrect,evaluated.unanswered,evaluated.attempted,evaluated.breakdown]);
-  for(const qr of evaluated.questionResults) await client.query("INSERT INTO question_results(result_id,attempt_question_id,outcome,awarded_marks,selected_option_ids) VALUES($1,$2,$3,$4,$5)",[result.rows[0].id,qr.attemptQuestionId,qr.outcome,qr.awardedMarks,JSON.stringify(qr.selectedOptionIds)]);
-  await client.query(`WITH ranked AS (SELECT tr.id,ROW_NUMBER() OVER(ORDER BY tr.score DESC,tr.accuracy DESC,ta.time_taken_seconds ASC,ta.submitted_at ASC,ta.id ASC)::int AS position FROM test_results tr JOIN test_attempts ta ON ta.id=tr.attempt_id WHERE tr.test_id=$1) UPDATE test_results tr SET rank=ranked.position FROM ranked WHERE tr.id=ranked.id`,[attempt.test_id]);
+  await client.query(`INSERT INTO question_results(result_id,attempt_question_id,outcome,awarded_marks,selected_option_ids)
+    SELECT $1,x.attempt_question_id,x.outcome,x.awarded_marks,x.selected_option_ids
+    FROM jsonb_to_recordset($2::jsonb) AS x(attempt_question_id uuid,outcome text,awarded_marks numeric,selected_option_ids jsonb)`,[result.rows[0].id,JSON.stringify(evaluated.questionResults.map((qr)=>({attempt_question_id:qr.attemptQuestionId,outcome:qr.outcome,awarded_marks:qr.awardedMarks,selected_option_ids:qr.selectedOptionIds})))]);
   return result.rows[0].id;
 }
 
 async function submitAttempt(attemptId,userId,answers=[],forceAuto=false) {
   const client=await pool.connect(); let resultId;
-  try{await client.query("BEGIN");const found=await client.query("SELECT * FROM test_attempts WHERE id=$1 AND user_id=$2 FOR UPDATE",[attemptId,userId]);const attempt=found.rows[0];if(!attempt)throw new ApiError(404,"Attempt not found");if(!forceAuto){const entitlement=await accessService.canAccessTest(userId,attempt.test_id,client);if(!entitlement.allowed)throw new ApiError(403,"Test access is no longer active",[entitlement.reason]);}const existing=await client.query("SELECT id FROM test_results WHERE attempt_id=$1",[attemptId]);if(existing.rows[0]){resultId=existing.rows[0].id;await client.query("COMMIT");return getResult(attemptId,userId);}if(attempt.status!=="ACTIVE")throw new ApiError(409,"Attempt cannot be submitted");for(const answer of answers)await upsertAnswerWithClient(client,attempt,answer);const auto=forceAuto||new Date(attempt.expires_at)<=new Date();resultId=await finalizeWithClient(client,attempt,auto);await client.query("COMMIT");}catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
+  try{await client.query("BEGIN");const found=await client.query("SELECT * FROM test_attempts WHERE id=$1 AND user_id=$2 FOR UPDATE",[attemptId,userId]);const attempt=found.rows[0];if(!attempt)throw new ApiError(404,"Attempt not found");const existing=await client.query("SELECT id FROM test_results WHERE attempt_id=$1",[attemptId]);if(existing.rows[0]){resultId=existing.rows[0].id;await client.query("COMMIT");}else{if(!forceAuto){const entitlement=await accessService.canAccessTest(userId,attempt.test_id,client);if(!entitlement.allowed)throw new ApiError(403,"Test access is no longer active",[entitlement.reason]);}if(attempt.status!=="ACTIVE")throw new ApiError(409,"Attempt cannot be submitted");await upsertAnswersWithClient(client,attempt,answers);const auto=forceAuto||new Date(attempt.expires_at)<=new Date();resultId=await finalizeWithClient(client,attempt,auto);await client.query("COMMIT");}}catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
   return getResult(attemptId,userId);
 }
 
 async function getResult(attemptId,userId) {
-  const result=await pool.query(`SELECT tr.*,ta.attempt_number,ta.started_at,ta.expires_at,ta.submitted_at,ta.time_taken_seconds,ta.auto_submitted,ta.test_snapshot,t.name AS test_name,t.ends_at,t.result_released_at,t.result_visibility,t.answer_key_visibility,t.explanation_visibility,t.leaderboard_enabled FROM test_results tr JOIN test_attempts ta ON ta.id=tr.attempt_id JOIN tests t ON t.id=tr.test_id WHERE tr.attempt_id=$1 AND tr.user_id=$2`,[attemptId,userId]);
+  const result=await pool.query(`SELECT tr.*,ta.attempt_number,ta.started_at,ta.expires_at,ta.submitted_at,ta.time_taken_seconds,ta.auto_submitted,ta.test_snapshot,t.name AS test_name,t.ends_at,t.result_released_at,t.result_visibility,t.answer_key_visibility,t.explanation_visibility,t.leaderboard_enabled,
+    (SELECT COUNT(*)::int+1 FROM test_results other JOIN test_attempts ota ON ota.id=other.attempt_id WHERE other.test_id=tr.test_id AND (
+      other.score>tr.score OR (other.score=tr.score AND other.accuracy>tr.accuracy) OR
+      (other.score=tr.score AND other.accuracy=tr.accuracy AND ota.time_taken_seconds<ta.time_taken_seconds) OR
+      (other.score=tr.score AND other.accuracy=tr.accuracy AND ota.time_taken_seconds=ta.time_taken_seconds AND ota.submitted_at<ta.submitted_at) OR
+      (other.score=tr.score AND other.accuracy=tr.accuracy AND ota.time_taken_seconds=ta.time_taken_seconds AND ota.submitted_at=ta.submitted_at AND ota.id<ta.id)
+    )) AS computed_rank
+    FROM test_results tr JOIN test_attempts ta ON ta.id=tr.attempt_id JOIN tests t ON t.id=tr.test_id WHERE tr.attempt_id=$1 AND tr.user_id=$2`,[attemptId,userId]);
   const row=result.rows[0];if(!row)throw new ApiError(404,"Result is not available");const entitlement=await accessService.canAccessTest(userId,row.test_id);if(!entitlement.allowed)throw new ApiError(403,"Test access is no longer active",[entitlement.reason]);
   if(!visibilityAllowed(row.result_visibility,row)) throw new ApiError(403,"Result has not been released yet");
-  return {id:row.id,attemptId,attemptNumber:row.attempt_number,testId:row.test_id,testName:row.test_name,score:Number(row.score),maxScore:Number(row.max_score),percentage:Number(row.percentage),accuracy:Number(row.accuracy),correct:row.correct_count,incorrect:row.incorrect_count,unanswered:row.unanswered_count,attempted:row.attempted_count,totalQuestions:row.correct_count+row.incorrect_count+row.unanswered_count,rank:row.test_snapshot.leaderboardEnabled?row.rank:null,startedAt:row.started_at,submittedAt:row.submitted_at,timeTakenSeconds:row.time_taken_seconds,autoSubmitted:row.auto_submitted,breakdown:row.breakdown,reviewAvailable:visibilityAllowed(row.answer_key_visibility,row)};
+  return {id:row.id,attemptId,attemptNumber:row.attempt_number,testId:row.test_id,testName:row.test_name,score:Number(row.score),maxScore:Number(row.max_score),percentage:Number(row.percentage),accuracy:Number(row.accuracy),correct:row.correct_count,incorrect:row.incorrect_count,unanswered:row.unanswered_count,attempted:row.attempted_count,totalQuestions:row.correct_count+row.incorrect_count+row.unanswered_count,rank:row.test_snapshot.leaderboardEnabled?row.computed_rank:null,startedAt:row.started_at,submittedAt:row.submitted_at,timeTakenSeconds:row.time_taken_seconds,autoSubmitted:row.auto_submitted,breakdown:row.breakdown,reviewAvailable:visibilityAllowed(row.answer_key_visibility,row)};
 }
 
 async function getReview(attemptId,userId) {
@@ -187,16 +222,34 @@ async function getReview(attemptId,userId) {
 
 async function leaderboard(testId) {
   const enabled=await pool.query("SELECT leaderboard_enabled FROM tests WHERE id=$1",[testId]);if(!enabled.rows[0])throw new ApiError(404,"Test not found");if(!enabled.rows[0].leaderboard_enabled)throw new ApiError(403,"Leaderboard is disabled");
-  const result=await pool.query(`SELECT tr.rank,u.full_name,tr.score,tr.max_score,tr.percentage,tr.accuracy,ta.time_taken_seconds,ta.attempt_number FROM test_results tr JOIN users u ON u.id=tr.user_id JOIN test_attempts ta ON ta.id=tr.attempt_id WHERE tr.test_id=$1 ORDER BY tr.rank LIMIT 100`,[testId]);
+  const result=await pool.query(`SELECT ROW_NUMBER() OVER(ORDER BY tr.score DESC,tr.accuracy DESC,ta.time_taken_seconds ASC,ta.submitted_at ASC,ta.id ASC)::int AS rank,u.full_name,tr.score,tr.max_score,tr.percentage,tr.accuracy,ta.time_taken_seconds,ta.attempt_number FROM test_results tr JOIN users u ON u.id=tr.user_id JOIN test_attempts ta ON ta.id=tr.attempt_id WHERE tr.test_id=$1 ORDER BY tr.score DESC,tr.accuracy DESC,ta.time_taken_seconds ASC,ta.submitted_at ASC,ta.id ASC LIMIT 100`,[testId]);
   return result.rows.map((row)=>({rank:row.rank,studentName:row.full_name.split(" ").map((part,index)=>index?`${part[0]}.`:part).join(" "),score:Number(row.score),maxScore:Number(row.max_score),percentage:Number(row.percentage),accuracy:Number(row.accuracy),timeTakenSeconds:row.time_taken_seconds,attemptNumber:row.attempt_number}));
 }
 
 async function recordEvent(attemptId,userId,event) { const result=await pool.query(`UPDATE test_attempts SET suspicious_events=suspicious_events||$3::jsonb WHERE id=$1 AND user_id=$2 AND status='ACTIVE' RETURNING id`,[attemptId,userId,JSON.stringify([{...event,receivedAt:new Date().toISOString()}])]);if(!result.rows[0])throw new ApiError(404,"Active attempt not found");return {recorded:true}; }
 
-async function expireDueAttempts() {
-  const due=await pool.query("SELECT id,user_id FROM test_attempts WHERE status='ACTIVE' AND expires_at<=NOW() ORDER BY expires_at LIMIT 100");
-  for(const row of due.rows){try{await submitAttempt(row.id,row.user_id,[],true);}catch(error){console.error("Could not auto-submit expired attempt",{attemptId:row.id,message:error.message});}}
-  return due.rowCount;
+async function expireOneDueAttempt(excludedIds=[]) {
+  const client=await pool.connect();let attempt;
+  try{
+    await client.query("BEGIN");
+    const due=await client.query("SELECT * FROM test_attempts WHERE status='ACTIVE' AND expires_at<=NOW() AND NOT(id=ANY($1::uuid[])) ORDER BY expires_at FOR UPDATE SKIP LOCKED LIMIT 1",[excludedIds]);
+    attempt=due.rows[0];
+    if(!attempt){await client.query("COMMIT");return false;}
+    await finalizeWithClient(client,attempt,true);
+    await client.query("COMMIT");return true;
+  }catch(error){await client.query("ROLLBACK");if(attempt)error.attemptId=attempt.id;throw error;}finally{client.release();}
+}
+
+async function expireDueAttempts(limit=100,concurrency=5) {
+  let nextSlot=0,processed=0;const failedIds=new Set();
+  async function worker(){
+    while(nextSlot<limit){
+      nextSlot+=1;
+      try{if(!await expireOneDueAttempt([...failedIds]))return;processed+=1;}catch(error){if(error.attemptId)failedIds.add(error.attemptId);console.error("Could not auto-submit expired attempt",{attemptId:error.attemptId,message:error.message});}
+    }
+  }
+  await Promise.all(Array.from({length:Math.min(limit,concurrency)},()=>worker()));
+  return processed;
 }
 
 module.exports={listPublishedSeries,getSeriesBySlug,getTestDetails,startAttempt,hydrateAttempt,saveAnswer,submitAttempt,getResult,getReview,leaderboard,recordEvent,expireDueAttempts};

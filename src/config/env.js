@@ -52,6 +52,11 @@ const env = {
   databaseUrl: process.env.DATABASE_URL || process.env.Db_URL,
   dbConnectionTimeoutMs: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 15000),
   dbQueryTimeoutMs: Number(process.env.DB_QUERY_TIMEOUT_MS || 30000),
+  dbPoolMax: boundedInteger(process.env.DB_POOL_MAX, nodeEnv === "production" ? 20 : 10, 1, 100),
+  dbPoolMin: boundedInteger(process.env.DB_POOL_MIN, nodeEnv === "production" ? 5 : 0, 0, 50),
+  dbIdleTimeoutMs: boundedInteger(process.env.DB_IDLE_TIMEOUT_MS, 30000, 1000, 300000),
+  dbMaxLifetimeSeconds: boundedInteger(process.env.DB_MAX_LIFETIME_SECONDS, 300, 30, 3600),
+  dbPoolMaxWaiting: boundedInteger(process.env.DB_POOL_MAX_WAITING, 500, 10, 5000),
   googleClientId: process.env.GOOGLE_CLIENT_ID || "",
   appleClientId: process.env.APPLE_CLIENT_ID || "",
   appleRedirectUrl: process.env.APPLE_REDIRECT_URL || "",
@@ -78,7 +83,17 @@ const env = {
   pdfStorageQuotaMb: Math.max(1, positiveNumber(process.env.PDF_STORAGE_QUOTA_MB, 9000)),
   pdfSignedUrlTtlSeconds: Math.min(3600, Math.max(60, positiveNumber(process.env.PDF_SIGNED_URL_TTL_SECONDS, 600))),
   trustProxyHops: boundedInteger(process.env.TRUST_PROXY_HOPS, nodeEnv === "production" ? 1 : 0, 0, 5),
+  redisUrl: (process.env.REDIS_URL || "").trim(),
   rateLimitStore: (process.env.RATE_LIMIT_STORE || (nodeEnv === "production" ? "postgres" : "memory")).trim().toLowerCase(),
+  apiRateLimit: boundedInteger(process.env.API_RATE_LIMIT, 1500, 100, 10000),
+  anonymousApiRateLimit: boundedInteger(process.env.ANONYMOUS_API_RATE_LIMIT, 20000, 100, 50000),
+  authRateLimit: boundedInteger(process.env.AUTH_RATE_LIMIT, 30, 5, 500),
+  rateLimitFailOpen: booleanValue(process.env.RATE_LIMIT_FAIL_OPEN, true),
+  expirySweepIntervalMs: boundedInteger(process.env.EXPIRY_SWEEP_INTERVAL_MS, 5000, 1000, 60000),
+  expirySweepBatchSize: boundedInteger(process.env.EXPIRY_SWEEP_BATCH_SIZE, 100, 1, 1000),
+  expirySweepConcurrency: boundedInteger(process.env.EXPIRY_SWEEP_CONCURRENCY, 5, 1, 20),
+  httpRequestTimeoutMs: boundedInteger(process.env.HTTP_REQUEST_TIMEOUT_MS, 30000, 5000, 120000),
+  shutdownGraceMs: boundedInteger(process.env.SHUTDOWN_GRACE_MS, 15000, 1000, 60000),
   runMigrationsOnStart: booleanValue(process.env.RUN_MIGRATIONS_ON_START, nodeEnv !== "production"),
   db: {
     user: process.env.DB_USER,
@@ -93,6 +108,7 @@ env.razorpayConfigured = Boolean(env.razorpayKeyId && env.razorpayKeySecret && e
 env.pdfStorageConfigured = Boolean(
   env.r2AccountId && env.r2AccessKeyId && env.r2SecretAccessKey && env.r2BucketName
 );
+if (env.dbPoolMin > env.dbPoolMax) throw new Error("DB_POOL_MIN must not exceed DB_POOL_MAX");
 
 if (env.nodeEnv === "production") {
   const missing = [];
@@ -108,6 +124,7 @@ if (env.nodeEnv === "production") {
   }
   if (!env.adminPortalAccessKey) missing.push("ADMIN_PORTAL_ACCESS_KEY");
   if (!env.adminPortalSigningKey) missing.push("ADMIN_PORTAL_SIGNING_KEY");
+  if (env.rateLimitStore === "redis" && !env.redisUrl) missing.push("REDIS_URL");
 
   if (missing.length) {
     throw new Error(`Missing production environment variables: ${missing.join(", ")}`);
@@ -128,9 +145,9 @@ if (env.nodeEnv === "production") {
       throw new Error(`Production FRONTEND_URL must be an HTTPS origin without a path: ${frontendUrl}`);
     }
   }
-  if (!['memory', 'postgres'].includes(env.rateLimitStore)) throw new Error("RATE_LIMIT_STORE must be memory or postgres");
+  if (!['memory', 'postgres', 'redis'].includes(env.rateLimitStore)) throw new Error("RATE_LIMIT_STORE must be memory, postgres, or redis");
   if (env.rateLimitStore === "memory") {
-    throw new Error("Production rate limiting must use the shared postgres store");
+    throw new Error("Production rate limiting must use a shared postgres or redis store");
   }
   const rotationCommand = /rotate-admin-password\.js$/i.test(process.argv[1] || "");
   if (process.env.NEW_ADMIN_PASSWORD && !rotationCommand) {

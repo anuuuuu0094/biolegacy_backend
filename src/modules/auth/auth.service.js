@@ -26,10 +26,11 @@ function sanitizeUser(user) {
   return result;
 }
 
-function signAccessToken(user) {
+function signAccessToken(user, sessionId) {
   return jwt.sign(
     {
       sub: user.id,
+      sid: sessionId,
       tokenType: "access",
       role: user.role,
       email: user.email,
@@ -45,9 +46,9 @@ function signAccessToken(user) {
   );
 }
 
-function signRefreshToken(user) {
+function signRefreshToken(user, sessionId) {
   return jwt.sign(
-    { sub: user.id, jti: crypto.randomUUID(), tokenType: "refresh" },
+    { sub: user.id, sid: sessionId, jti: crypto.randomUUID(), tokenType: "refresh" },
     env.jwtRefreshSecret,
     {
       expiresIn: env.refreshTokenTtl,
@@ -62,23 +63,45 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-async function persistRefreshToken(userId, refreshToken) {
+async function persistRefreshToken(client, sessionId, userId, refreshToken, device) {
   const decoded = jwt.decode(refreshToken);
-  await pool.query(
-    `INSERT INTO refresh_tokens(user_id, token_hash, expires_at)
-     VALUES($1, $2, to_timestamp($3))`,
-    [userId, hashToken(refreshToken), decoded.exp]
+  await client.query(
+    `INSERT INTO refresh_tokens(id, user_id, token_hash, device_type, user_agent, expires_at)
+     VALUES($1, $2, $3, $4, $5, to_timestamp($6))`,
+    [sessionId, userId, hashToken(refreshToken), device.deviceType, device.userAgent, decoded.exp]
   );
 }
 
-async function createSession(user) {
+async function createSession(user, device = { deviceType: "DESKTOP", userAgent: null }) {
   if (user.status !== "ACTIVE") throw new ApiError(403, "Account is not active");
-  const updated = await pool.query("UPDATE users SET last_login_at=NOW() WHERE id=$1 RETURNING *", [user.id]);
-  const signedInUser = updated.rows[0] || user;
-  const accessToken = signAccessToken(signedInUser);
-  const refreshToken = signRefreshToken(signedInUser);
-  await persistRefreshToken(signedInUser.id, refreshToken);
-  return { user: sanitizeUser(signedInUser), accessToken, refreshToken };
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    // Lock the account before replacing a slot so concurrent logins are ordered.
+    await client.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [user.id]);
+    const updated = await client.query(
+      "UPDATE users SET last_login_at=NOW() WHERE id=$1 RETURNING *",
+      [user.id],
+    );
+    const signedInUser = updated.rows[0] || user;
+    await client.query(
+      `UPDATE refresh_tokens SET revoked_at=NOW()
+       WHERE user_id=$1 AND device_type=$2 AND revoked_at IS NULL`,
+      [signedInUser.id, device.deviceType],
+    );
+
+    const sessionId = crypto.randomUUID();
+    const accessToken = signAccessToken(signedInUser, sessionId);
+    const refreshToken = signRefreshToken(signedInUser, sessionId);
+    await persistRefreshToken(client, sessionId, signedInUser.id, refreshToken, device);
+    await client.query("COMMIT");
+    return { user: sanitizeUser(signedInUser), accessToken, refreshToken };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function authenticateWithPassword({ email, password }) {
@@ -92,23 +115,23 @@ async function authenticateWithPassword({ email, password }) {
   return user;
 }
 
-async function login(input) {
+async function login(input, device) {
   const user = await authenticateWithPassword(input);
   if (user.role === "TEACHER_ADMIN") {
     throw new ApiError(403, "This account cannot sign in here");
   }
-  return createSession(user);
+  return createSession(user, device);
 }
 
-async function adminLogin(input) {
+async function adminLogin(input, device) {
   const user = await authenticateWithPassword(input);
   if (user.role !== "TEACHER_ADMIN") {
     throw new ApiError(401, "Invalid administrator credentials");
   }
-  return createSession(user);
+  return createSession(user, device);
 }
 
-async function loginWithIdentity(provider, input) {
+async function loginWithIdentity(provider, input, device) {
   const { identityToken, nonce, displayName, authorizationCode } = input;
   const verifiedToken = provider === "apple"
     ? await exchangeAppleAuthorizationCode(authorizationCode)
@@ -175,14 +198,14 @@ async function loginWithIdentity(provider, input) {
   } finally {
     client.release();
   }
-  return createSession(user);
+  return createSession(user, device);
 }
 
 async function sendPhoneCode(phone) {
   return otpProvider.sendPhoneCode(phone);
 }
 
-async function checkPhoneCode({ phone, code, fullName }) {
+async function checkPhoneCode({ phone, code, fullName }, device) {
   await otpProvider.verifyPhoneCode(phone, code);
 
   const client = await pool.connect();
@@ -232,7 +255,7 @@ async function checkPhoneCode({ phone, code, fullName }) {
   } finally {
     client.release();
   }
-  return createSession(user);
+  return createSession(user, device);
 }
 
 function getProviderSettings() {
@@ -256,45 +279,63 @@ async function refresh(refreshToken) {
   } catch {
     throw new ApiError(401, "Invalid or expired refresh token");
   }
-  if (payload.tokenType !== "refresh" || typeof payload.sub !== "string" || typeof payload.jti !== "string") {
+  if (
+    payload.tokenType !== "refresh"
+    || typeof payload.sub !== "string"
+    || typeof payload.sid !== "string"
+    || typeof payload.jti !== "string"
+  ) {
     throw new ApiError(401, "Invalid or expired refresh token");
   }
 
   const tokenHash = hashToken(refreshToken);
-  const tokenResult = await pool.query(
-    `SELECT rt.user_id, u.* FROM refresh_tokens rt
-     JOIN users u ON u.id=rt.user_id
-     WHERE rt.token_hash=$1 AND rt.revoked_at IS NULL AND rt.expires_at > NOW()`,
-    [tokenHash]
-  );
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const tokenResult = await client.query(
+      `SELECT rt.id AS session_id, rt.user_id, u.* FROM refresh_tokens rt
+       JOIN users u ON u.id=rt.user_id
+       WHERE rt.id=$1 AND rt.token_hash=$2
+         AND rt.revoked_at IS NULL AND rt.expires_at > NOW()
+       FOR UPDATE OF rt`,
+      [payload.sid, tokenHash],
+    );
 
-  const row = tokenResult.rows[0];
-  if (!row || row.user_id !== payload.sub || row.status !== "ACTIVE") {
-    throw new ApiError(401, "Refresh token is no longer valid");
+    const row = tokenResult.rows[0];
+    if (!row || row.user_id !== payload.sub || row.status !== "ACTIVE") {
+      throw new ApiError(401, "Refresh token is no longer valid");
+    }
+
+    const user = {
+      id: row.user_id,
+      full_name: row.full_name,
+      email: row.email,
+      phone: row.phone,
+      role: row.role,
+      status: row.status,
+      avatar_url: row.avatar_url,
+      email_verified: row.email_verified,
+      phone_verified: row.phone_verified,
+    };
+    const accessToken = signAccessToken(user, row.session_id);
+    const nextRefreshToken = signRefreshToken(user, row.session_id);
+    const decoded = jwt.decode(nextRefreshToken);
+    const rotated = await client.query(
+      `UPDATE refresh_tokens
+       SET token_hash=$2, expires_at=to_timestamp($3), last_seen_at=NOW()
+       WHERE id=$1 AND token_hash=$4 AND revoked_at IS NULL
+       RETURNING id`,
+      [row.session_id, hashToken(nextRefreshToken), decoded.exp, tokenHash],
+    );
+    if (!rotated.rowCount) throw new ApiError(401, "Refresh token is no longer valid");
+    await client.query("COMMIT");
+    return { user: sanitizeUser(user), accessToken, refreshToken: nextRefreshToken };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
   }
-
-  const revoked = await pool.query(
-    "UPDATE refresh_tokens SET revoked_at=NOW() WHERE token_hash=$1 AND revoked_at IS NULL RETURNING id",
-    [tokenHash]
-  );
-  if (!revoked.rowCount) throw new ApiError(401, "Refresh token is no longer valid");
-
-  const user = {
-    id: row.user_id,
-    full_name: row.full_name,
-    email: row.email,
-    phone: row.phone,
-    role: row.role,
-    status: row.status,
-    avatar_url: row.avatar_url,
-    email_verified: row.email_verified,
-    phone_verified: row.phone_verified,
-  };
-  const accessToken = signAccessToken(user);
-  const nextRefreshToken = signRefreshToken(user);
-  await persistRefreshToken(user.id, nextRefreshToken);
-
-  return { user: sanitizeUser(user), accessToken, refreshToken: nextRefreshToken };
 }
 
 async function logout(refreshToken) {

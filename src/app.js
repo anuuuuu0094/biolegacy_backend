@@ -2,10 +2,12 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const compression = require("compression");
 const cookieParser = require("cookie-parser");
 const env = require("./config/env");
 const routes = require("./routes");
 const { apiLimiter } = require("./middleware/security");
+const rejectWhenDatabaseQueueIsFull = require("./middleware/overload");
 const { notFound, errorHandler } = require("./middleware/errorHandler");
 const webhookRoutes = require("./modules/payments/webhook.routes");
 
@@ -14,6 +16,7 @@ const app = express();
 app.disable("x-powered-by");
 if (env.trustProxyHops > 0) app.set("trust proxy", env.trustProxyHops);
 app.use(helmet());
+app.use(compression({ threshold: 1024 }));
 app.use(
   cors({
     origin(origin, callback) {
@@ -27,6 +30,7 @@ app.use(
   })
 );
 // Reject abusive clients before allocating memory to JSON/raw-body parsing.
+app.use(rejectWhenDatabaseQueueIsFull);
 app.use(apiLimiter);
 // Razorpay signs the exact request bytes. This route must run before express.json().
 app.use("/api/v1/payments/webhook", express.raw({ type: "application/json", limit: "1mb" }), webhookRoutes);

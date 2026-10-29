@@ -32,8 +32,11 @@ FRONTEND_URL=http://localhost:3000
 DATABASE_URL=postgresql://user:password@host:5432/biolegacy
 DB_CONNECTION_TIMEOUT_MS=15000
 DB_QUERY_TIMEOUT_MS=30000
+DB_POOL_MAX=20
+DB_POOL_MIN=5
 TRUST_PROXY_HOPS=1
-RATE_LIMIT_STORE=postgres
+RATE_LIMIT_STORE=redis
+REDIS_URL=redis://default:password@private-host:6379
 RUN_MIGRATIONS_ON_START=false
 JWT_ACCESS_SECRET=replace-with-long-secret
 JWT_REFRESH_SECRET=replace-with-another-long-secret
@@ -74,7 +77,21 @@ To rotate an existing administrator password, set `NEW_ADMIN_PASSWORD` in the ig
 
 The API requires separate `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` values in production. Tokens are also bound to `JWT_ISSUER`, `JWT_AUDIENCE`, and an access/refresh token type. The development server generates an ephemeral secret for any missing value, so sessions will end on restart until both are configured.
 
-Production uses a PostgreSQL-backed, hashed-key rate-limit store so limits are shared across instances. Run `npm run db:migrate` before starting a production release; keep `RUN_MIGRATIONS_ON_START=false` so the runtime database identity does not need schema-changing privileges. `TRUST_PROXY_HOPS` must match the hosting proxy path (one hop for the current Render setup), rather than blindly trusting every forwarded address.
+Production rate limiting must use a shared Redis or PostgreSQL store. Run `npm run db:migrate` before starting a production release; keep `RUN_MIGRATIONS_ON_START=false` so the runtime database identity does not need schema-changing privileges. `TRUST_PROXY_HOPS` must match the hosting proxy path (one hop for the current Render setup), rather than blindly trusting every forwarded address.
+
+For a multi-instance deployment, Redis is the preferred rate-limit store. Set
+`RATE_LIMIT_STORE=redis` and `REDIS_URL` to a private same-region Redis/Valkey
+endpoint. PostgreSQL remains supported as a shared fallback, but it adds a write
+to the primary database for every API request. Configure each API instance with
+`DB_POOL_MAX=20` only when the database connection budget can accommodate
+`instance count x DB_POOL_MAX` plus migration and administration connections.
+
+The exam hot paths use batched PostgreSQL writes, calculate leaderboard ranks
+without rewriting every previous result, and use `FOR UPDATE SKIP LOCKED` so
+multiple API instances can auto-submit expired attempts safely. Apply migration
+`006_concurrency_indexes.sql` before deploying this version. The production
+capacity checklist and staging load-test procedure are in
+[`docs/scaling-1000-users.md`](docs/scaling-1000-users.md).
 
 ## Phone OTP with 2Factor
 

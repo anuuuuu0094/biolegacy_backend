@@ -11,6 +11,11 @@ const useSsl = Boolean(databaseHost && !["localhost", "127.0.0.1", "::1"].includ
 const connectionOptions = {
   connectionTimeoutMillis: env.dbConnectionTimeoutMs,
   query_timeout: env.dbQueryTimeoutMs,
+  statement_timeout: env.dbQueryTimeoutMs,
+  max: env.dbPoolMax,
+  min: env.dbPoolMin,
+  idleTimeoutMillis: env.dbIdleTimeoutMs,
+  maxLifetimeSeconds: env.dbMaxLifetimeSeconds,
   keepAlive: true,
 };
 

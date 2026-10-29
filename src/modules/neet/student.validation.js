@@ -7,6 +7,6 @@ const answerSchema=Joi.object({
   visited:Joi.boolean().default(true), markedForReview:Joi.boolean().default(false),
   timeSpentSeconds:Joi.number().integer().min(0).max(86400).default(0),
 });
-const submitSchema=Joi.object({answers:Joi.array().items(answerSchema).max(500).default([])});
+const submitSchema=Joi.object({answers:Joi.array().items(answerSchema).max(500).unique("attemptQuestionId").default([])});
 const eventSchema=Joi.object({type:Joi.string().valid("TAB_HIDDEN","FULLSCREEN_EXIT","RECONNECT").required(),occurredAt:Joi.date().iso().required()});
 module.exports={idParams,slugParams,answerSchema,submitSchema,eventSchema};

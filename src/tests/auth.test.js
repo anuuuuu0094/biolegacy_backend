@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const app = require("../app");
 const pool = require("../db/pool");
@@ -10,6 +11,9 @@ const otpProvider = require("../modules/auth/otpProvider");
 const adminService = require("../modules/admin/admin.service");
 const pdfStorage = require("../services/pdfStorage");
 const { createAdminPortalSignature, createAdminGateAttemptSignature } = require("../middleware/adminPortal");
+const { classifyDevice } = require("../modules/auth/device");
+
+const TEST_SESSION_ID = "00000000-0000-4000-8000-000000000088";
 
 test("2Factor sends and verifies an OTP without exposing the API key to the client", async () => {
   const previous = {
@@ -95,6 +99,7 @@ test("administrator login endpoint requires a signed portal request", async () =
 
 test("a signed administrator login returns an admin session", async () => {
   const originalQuery = pool.query;
+  const originalConnect = pool.connect;
   const server = app.listen(0);
   const passwordHash = await bcrypt.hash("PrivateAdminPassword1!", 4);
   const admin = {
@@ -111,10 +116,26 @@ test("a signed administrator login returns an admin session", async () => {
   };
   pool.query = async (sql) => {
     if (sql.includes("SELECT * FROM users WHERE email")) return { rows: [admin] };
-    if (sql.includes("UPDATE users SET last_login_at")) return { rows: [{ ...admin, last_login_at: new Date() }] };
-    if (sql.includes("INSERT INTO refresh_tokens")) return { rows: [] };
     throw new Error(`Unexpected query: ${sql}`);
   };
+  pool.connect = async () => ({
+    query: async (sql, params) => {
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [] };
+      if (sql.includes("SELECT id FROM users") && sql.includes("FOR UPDATE")) return { rows: [{ id: admin.id }] };
+      if (sql.includes("UPDATE users SET last_login_at")) return { rows: [{ ...admin, last_login_at: new Date() }] };
+      if (sql.includes("UPDATE refresh_tokens SET revoked_at")) {
+        assert.equal(params[1], "MOBILE");
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("INSERT INTO refresh_tokens")) {
+        assert.equal(params[3], "MOBILE");
+        assert.match(params[4], /iPhone/);
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`Unexpected transaction query: ${sql}`);
+    },
+    release() {},
+  });
   try {
     const timestamp = String(Date.now());
     const signature = createAdminPortalSignature(timestamp, admin.email);
@@ -124,6 +145,7 @@ test("a signed administrator login returns an admin session", async () => {
         "Content-Type": "application/json",
         "X-BioLegacy-Admin-Timestamp": timestamp,
         "X-BioLegacy-Admin-Signature": signature,
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
       },
       body: JSON.stringify({ email: admin.email, password: "PrivateAdminPassword1!" }),
     });
@@ -133,6 +155,87 @@ test("a signed administrator login returns an admin session", async () => {
     assert.equal(payload.data.user.role, "TEACHER_ADMIN");
     assert.ok(payload.data.accessToken);
     assert.ok(payload.data.refreshToken);
+  } finally {
+    pool.query = originalQuery;
+    pool.connect = originalConnect;
+    server.close();
+  }
+});
+
+test("device classification separates mobile and desktop session slots", () => {
+  assert.equal(classifyDevice("Mozilla/5.0 (Linux; Android 14; Pixel 8) Mobile"), "MOBILE");
+  assert.equal(classifyDevice("Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)"), "MOBILE");
+  assert.equal(classifyDevice("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"), "DESKTOP");
+  assert.equal(classifyDevice("Mozilla/5.0 (X11; Linux x86_64)", "?1"), "MOBILE");
+});
+
+test("refresh rotation keeps the same session and rejects reuse of the previous token", async () => {
+  const originalConnect = pool.connect;
+  const userId = "00000000-0000-4000-8000-000000000077";
+  const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
+  const initialToken = jwt.sign(
+    { sub: userId, sid: TEST_SESSION_ID, jti: "initial-refresh", tokenType: "refresh" },
+    env.jwtRefreshSecret,
+    { expiresIn: "1h", issuer: env.jwtIssuer, audience: env.jwtAudience },
+  );
+  let currentHash = hash(initialToken);
+  pool.connect = async () => ({
+    query: async (sql, params) => {
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [] };
+      if (sql.includes("SELECT rt.id AS session_id")) {
+        if (params[1] !== currentHash) return { rows: [], rowCount: 0 };
+        return { rows: [{
+          session_id: TEST_SESSION_ID,
+          user_id: userId,
+          full_name: "Student",
+          email: "student@example.com",
+          phone: null,
+          role: "STUDENT",
+          status: "ACTIVE",
+          avatar_url: null,
+          email_verified: true,
+          phone_verified: false,
+        }] };
+      }
+      if (sql.includes("SET token_hash=$2")) {
+        assert.equal(params[0], TEST_SESSION_ID);
+        assert.equal(params[3], currentHash);
+        currentHash = params[1];
+        return { rows: [{ id: TEST_SESSION_ID }], rowCount: 1 };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+    release() {},
+  });
+  try {
+    const rotated = await authService.refresh(initialToken);
+    assert.equal(jwt.decode(rotated.accessToken).sid, TEST_SESSION_ID);
+    assert.equal(jwt.decode(rotated.refreshToken).sid, TEST_SESSION_ID);
+    assert.notEqual(rotated.refreshToken, initialToken);
+    await assert.rejects(authService.refresh(initialToken), { statusCode: 401 });
+  } finally {
+    pool.connect = originalConnect;
+  }
+});
+
+test("access-token middleware rejects a revoked or replaced session immediately", async () => {
+  const originalQuery = pool.query;
+  const server = app.listen(0);
+  pool.query = async (sql) => {
+    assert.match(sql, /JOIN refresh_tokens/);
+    return { rows: [] };
+  };
+  try {
+    const token = jwt.sign(
+      { sub: "student-1", sid: TEST_SESSION_ID, role: "STUDENT", tokenType: "access" },
+      env.jwtAccessSecret,
+      { expiresIn: "15m", issuer: env.jwtIssuer, audience: env.jwtAudience },
+    );
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/student/me/learning`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.status, 401);
+    assert.equal((await response.json()).message, "Session is no longer active");
   } finally {
     pool.query = originalQuery;
     server.close();
@@ -222,7 +325,7 @@ test("suspended accounts cannot use an existing access token", async () => {
   pool.query = async () => ({ rows: [{ id: "student-1", role: "STUDENT", status: "SUSPENDED" }] });
   try {
     const token = jwt.sign(
-      { sub: "student-1", role: "STUDENT", tokenType: "access" },
+      { sub: "student-1", sid: TEST_SESSION_ID, role: "STUDENT", tokenType: "access" },
       env.jwtAccessSecret,
       { expiresIn: "15m", issuer: env.jwtIssuer, audience: env.jwtAudience },
     );
@@ -238,17 +341,26 @@ test("suspended accounts cannot use an existing access token", async () => {
 });
 
 test("suspended accounts cannot refresh a token", async () => {
-  const originalQuery = pool.query;
-  pool.query = async () => ({ rows: [{ user_id: "student-1", status: "SUSPENDED" }] });
+  const originalConnect = pool.connect;
+  pool.connect = async () => ({
+    query: async (sql) => {
+      if (["BEGIN", "ROLLBACK"].includes(sql)) return { rows: [] };
+      if (sql.includes("SELECT rt.id AS session_id")) {
+        return { rows: [{ session_id: TEST_SESSION_ID, user_id: "student-1", status: "SUSPENDED" }] };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+    release() {},
+  });
   try {
     const token = jwt.sign(
-      { sub: "student-1", jti: "test-session", tokenType: "refresh" },
+      { sub: "student-1", sid: TEST_SESSION_ID, jti: "test-session", tokenType: "refresh" },
       env.jwtRefreshSecret,
       { expiresIn: "1h", issuer: env.jwtIssuer, audience: env.jwtAudience },
     );
     await assert.rejects(authService.refresh(token), { statusCode: 401 });
   } finally {
-    pool.query = originalQuery;
+    pool.connect = originalConnect;
   }
 });
 
@@ -365,7 +477,7 @@ test("an active administrator can assign a course through the API", async () => 
   const adminId = "00000000-0000-4000-8000-000000000003";
   const server = app.listen(0);
   pool.query = async (sql) => {
-    if (sql.includes("SELECT id, role, status FROM users")) return { rows: [{ id: adminId, role: "TEACHER_ADMIN", status: "ACTIVE" }] };
+    if (sql.includes("JOIN refresh_tokens")) return { rows: [{ id: adminId, role: "TEACHER_ADMIN", status: "ACTIVE" }] };
     if (sql.includes("SELECT id FROM users")) return { rows: [{ id: studentId }] };
     if (sql.includes("SELECT id FROM courses")) return { rows: [{ id: courseId }] };
     if (sql.includes("INSERT INTO enrollments")) return { rows: [{ id: "00000000-0000-4000-8000-000000000004" }] };
@@ -374,7 +486,7 @@ test("an active administrator can assign a course through the API", async () => 
   };
   try {
     const token = jwt.sign(
-      { sub: adminId, role: "TEACHER_ADMIN", tokenType: "access" },
+      { sub: adminId, sid: TEST_SESSION_ID, role: "TEACHER_ADMIN", tokenType: "access" },
       env.jwtAccessSecret,
       { expiresIn: "15m", issuer: env.jwtIssuer, audience: env.jwtAudience },
     );
@@ -415,7 +527,7 @@ test("an authenticated user can update only supported profile fields", async () 
   const userId = "00000000-0000-4000-8000-000000000010";
   const server = app.listen(0);
   pool.query = async (sql, params) => {
-    if (sql.includes("SELECT id, role, status FROM users")) {
+    if (sql.includes("JOIN refresh_tokens")) {
       return { rows: [{ id: userId, role: "STUDENT", status: "ACTIVE" }] };
     }
     if (sql.includes("UPDATE users") && sql.includes("full_name=$2")) {
@@ -438,7 +550,7 @@ test("an authenticated user can update only supported profile fields", async () 
   };
   try {
     const token = jwt.sign(
-      { sub: userId, role: "STUDENT", tokenType: "access" },
+      { sub: userId, sid: TEST_SESSION_ID, role: "STUDENT", tokenType: "access" },
       env.jwtAccessSecret,
       { expiresIn: "15m", issuer: env.jwtIssuer, audience: env.jwtAudience },
     );
@@ -467,14 +579,14 @@ test("profile updates reject unsafe avatar protocols before reaching the databas
   const userId = "00000000-0000-4000-8000-000000000011";
   const server = app.listen(0);
   pool.query = async (sql) => {
-    if (sql.includes("SELECT id, role, status FROM users")) {
+    if (sql.includes("JOIN refresh_tokens")) {
       return { rows: [{ id: userId, role: "STUDENT", status: "ACTIVE" }] };
     }
     throw new Error(`Unexpected query: ${sql}`);
   };
   try {
     const token = jwt.sign(
-      { sub: userId, role: "STUDENT", tokenType: "access" },
+      { sub: userId, sid: TEST_SESSION_ID, role: "STUDENT", tokenType: "access" },
       env.jwtAccessSecret,
       { expiresIn: "15m", issuer: env.jwtIssuer, audience: env.jwtAudience },
     );

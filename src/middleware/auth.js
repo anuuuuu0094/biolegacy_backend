@@ -3,6 +3,19 @@ const env = require("../config/env");
 const ApiError = require("../utils/apiError");
 const pool = require("../db/pool");
 
+async function findActiveSessionUser(claims) {
+  if (typeof claims.sid !== "string") return null;
+  const result = await pool.query(
+    `SELECT u.id, u.role, u.status
+     FROM users u
+     JOIN refresh_tokens rt ON rt.user_id=u.id
+     WHERE u.id=$1 AND rt.id=$2
+       AND rt.revoked_at IS NULL AND rt.expires_at > NOW()`,
+    [claims.sub, claims.sid],
+  );
+  return result.rows[0] || null;
+}
+
 async function authenticate(req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
@@ -21,14 +34,13 @@ async function authenticate(req, res, next) {
   } catch {
     throw new ApiError(401, "Invalid or expired access token");
   }
-  if (claims.tokenType !== "access" || typeof claims.sub !== "string") {
+  if (claims.tokenType !== "access" || typeof claims.sub !== "string" || typeof claims.sid !== "string") {
     throw new ApiError(401, "Invalid or expired access token");
   }
 
-  const result = await pool.query("SELECT id, role, status FROM users WHERE id=$1", [claims.sub]);
-  const user = result.rows[0];
+  const user = await findActiveSessionUser(claims);
   if (!user || user.status !== "ACTIVE") {
-    throw new ApiError(401, "Account is no longer active");
+    throw new ApiError(401, "Session is no longer active");
   }
   req.user = { ...claims, role: user.role };
     next();
@@ -43,9 +55,8 @@ async function optionalAuthenticate(req, res, next) {
       issuer: env.jwtIssuer,
       audience: env.jwtAudience,
     });
-    if (claims.tokenType !== "access" || typeof claims.sub !== "string") return next();
-    const result = await pool.query("SELECT id, role, status FROM users WHERE id=$1", [claims.sub]);
-    const user = result.rows[0];
+    if (claims.tokenType !== "access" || typeof claims.sub !== "string" || typeof claims.sid !== "string") return next();
+    const user = await findActiveSessionUser(claims);
     if (user?.status === "ACTIVE") req.user = { ...claims, role: user.role };
   } catch {
     // Public catalogue requests remain public when an optional token is stale.
